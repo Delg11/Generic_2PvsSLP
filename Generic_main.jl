@@ -7,9 +7,12 @@ using Pkg
 
 # Ativa o ambiente associado ao diretório onde este arquivo está salvo
 Pkg.activate(@__DIR__) 
-
 # Lê o Manifest.toml e instala/pré-compila todas as dependências necessárias
 Pkg.instantiate()
+
+# Importante: Certifique-se de que o ArgParse está adicionado ao seu ambiente
+# Pkg.add("ArgParse")
+using ArgParse
 
 using CUTEst
 using LinearAlgebra
@@ -20,6 +23,7 @@ using XLSX
 using Dates
 using Plots
 using CSV
+
 # Inclui os módulos dos algoritmos
 include("Generic_Sharedtypes.jl")
 include("Generic_module_Twophase.jl")
@@ -30,7 +34,37 @@ using .Generic_module_Twophase
 using .Generic_module_slp
 
 # ==============================================================================
-# 2. FUNÇÕES DE AVALIAÇÃO DE MÉTRICAS E PLOTS (PÓS-PROCESSAMENTO)
+# 2. CONFIGURAÇÃO DE ARGUMENTOS DE LINHA DE COMANDO
+# ==============================================================================
+function parse_commandline()
+    s = ArgParseSettings(description="Benchmark de Otimização SLP e TwoPhase")
+
+    @add_arg_table s begin
+        "--mode", "-m"
+            help = "Modo de execução: 'test' para lista fixa de problemas ou 'filter' para buscar no CUTEst."
+            arg_type = String
+            default = "test"
+        "--problems", "-p"
+            help = "Lista de problemas separados por vírgula (usado apenas no modo 'test')."
+            arg_type = String
+            default = "HS6,ROSENBR"
+        "--max-var", "-v"
+            help = "Número máximo de variáveis (-1 para sem limite)."
+            arg_type = Int
+            default = -1
+        "--max-con", "-c"
+            help = "Número máximo de restrições (-1 para sem limite)."
+            arg_type = Int
+            default = -1
+    end
+
+    return parse_args(s)
+end
+
+args = parse_commandline()
+
+# ==============================================================================
+# 3. FUNÇÕES DE AVALIAÇÃO DE MÉTRICAS E PLOTS (PÓS-PROCESSAMENTO)
 # ==============================================================================
 function evaluate_m1(it_v, it_b, f_v, f_b, h_v, h_b, eps)
     if h_v > h_b + eps || f_v > f_b + eps return :Loss end
@@ -120,7 +154,7 @@ function plot_performance_profile_fbest(df, variants_to_compare, title_suffix;
 end
 
 # ==============================================================================
-# 3. CONFIGURAÇÃO GERAL E SELEÇÃO DE ALGORITMOS
+# 4. CONFIGURAÇÃO GERAL E SELEÇÃO DE ALGORITMOS
 # ==============================================================================
 println("\n" * "=" ^ 80)
 println("⚙️ CONFIGURANDO VARIANTES E AMBIENTE DE EXPORTAÇÃO")
@@ -191,11 +225,46 @@ df_slp = DataFrame(Problema=String[], nvar=Int[], ncon=Int[], Variante=String[],
                    Tempo_ms=Float64[], f_final=Float64[], h_norm=Float64[], Is_Base=Bool[])
 
 # ==============================================================================
-# 4. LOOP PRINCIPAL DE EXECUÇÃO
+# 5. SELEÇÃO DE PROBLEMAS E LOOP PRINCIPAL
 # ==============================================================================
-problems = ["HS6", "ROSENBR"]
-# problems = select_sif_problems(max_var = 10, min_con = 0, max_con = 1, only_equ_con = true)
-println("\nTotal de problemas selecionados: $(length(problems))")
+if args["mode"] == "test"
+    problems = String.(split(args["problems"], ","))
+    println("\nModo TESTE ativado. Analisando a lista de problemas fixos.")
+elseif args["mode"] == "filter"
+    println("\nModo FILTER ativado. Construindo query...")
+    
+    # Dicionário para armazenar apenas os filtros que o usuário realmente definiu
+    filtros = Dict{Symbol, Int}()
+    
+    print("Filtros -> ")
+    if args["max-var"] != -1
+        filtros[:max_var] = args["max-var"]
+        print("Max Var: $(args["max-var"]) | ")
+    else
+        print("Max Var: [Sem limite] | ")
+    end
+    
+    if args["max-con"] != -1
+        filtros[:max_con] = args["max-con"]
+        print("Max Con: $(args["max-con"])")
+    else
+        print("Max Con: [Sem limite]")
+    end
+    println() # Quebra de linha
+    
+    # O ; desempacota o dicionário passando as chaves como argumentos nomeados
+    problems = select_sif_problems(; filtros...)
+else
+    println("\n❌ ERRO: O modo especificado ('$(args["mode"])') é inválido. Use 'test' ou 'filter'.")
+    exit(1)
+end
+
+println("Total de problemas selecionados: $(length(problems))")
+
+if length(problems) == 0
+    println("Nenhum problema encontrado para os parâmetros selecionados. Encerrando.")
+    exit(0)
+end
 
 function get_status_string(status_code::Int)
     if status_code == 0 return "KKT_OK"
@@ -207,13 +276,14 @@ function get_status_string(status_code::Int)
 end
 
 for prob_name in problems
-    println("\n🚀 PROCESSANDO: $prob_name")
     local nlp = nothing
     try
         nlp = CUTEstModel{Float64}(prob_name)
         problem = SharedTypes.build_optimization_problem(nlp)
         x0 = clamp.(nlp.meta.x0, problem.xl, problem.xu)
         dim, ncon = nlp.meta.nvar, nlp.meta.ncon
+
+        println("\n🚀 PROCESSANDO: $prob_name [Var: $dim | Con: $ncon]")
 
         if RUN_TWOPHASE
             for var in variantes_twophase
@@ -240,17 +310,20 @@ for prob_name in problems
         println("❌ ERRO em $prob_name: $e")
     finally
         isnothing(nlp) || finalize(nlp)
+        
+        # Backup incremental para evitar perda de dados em caso de crash
+        CSV.write(joinpath(dir_resultados, "backup_parcial_twophase.csv"), df_twophase)
+        CSV.write(joinpath(dir_resultados, "backup_parcial_slp.csv"), df_slp)
     end
 end
 
 # ==============================================================================
-# 5. ANÁLISE CONSOLIDADA (INTEGRAÇÃO DIRETA NA MEMÓRIA)
+# 6. ANÁLISE CONSOLIDADA (INTEGRAÇÃO DIRETA NA MEMÓRIA)
 # ==============================================================================
 println("\n" * "=" ^ 80)
 println("📊 INICIANDO ANÁLISE CONSOLIDADA E ESTATÍSTICAS")
 println("=" ^ 80)
 
-# Merge direto da memória (sem conversões de tipo via tryparse necessárias)
 df_all = vcat(df_slp, df_twophase, cols=:union)
 
 ignored_variants = ["BASE_2P", "2P_M1_BQ1_ATR0_URU0", "2P_M1_BQ1_ATR1_URU0"]
@@ -312,7 +385,6 @@ m1_w, m1_t, m1_l, m2_w, m2_t, m2_l, m3_w, m3_t, m3_l, total_inter = zeros(Int, 1
 inter_details = []
 
 for prob in unique(df_valid.Problema)
-    # Permite a modificação das variáveis globais dentro deste laço local
     global m1_w, m1_t, m1_l, m2_w, m2_t, m2_l, m3_w, m3_t, m3_l, total_inter
     
     df_prob = filter(r -> r.Problema == prob, df_valid)
@@ -363,17 +435,21 @@ end
 output_file = joinpath(dir_resultados, "Consolidated_Statistics.xlsx")
 XLSX.openxlsx(output_file, mode="w") do xf
     XLSX.rename!(xf[1], "Scenario_A")
-    XLSX.writetable!(xf[1], collect(eachcol(stats_A)), names(stats_A))
+    if nrow(stats_A) > 0 XLSX.writetable!(xf[1], collect(eachcol(stats_A)), names(stats_A)) end
+    
     XLSX.addsheet!(xf, "Scenario_B")
-    XLSX.writetable!(xf[2], collect(eachcol(stats_B)), names(stats_B))
+    if nrow(stats_B) > 0 XLSX.writetable!(xf[2], collect(eachcol(stats_B)), names(stats_B)) end
+    
     XLSX.addsheet!(xf, "Scenario_C")
-    XLSX.writetable!(xf[3], collect(eachcol(stats_C)), names(stats_C))
+    if nrow(stats_C) > 0 XLSX.writetable!(xf[3], collect(eachcol(stats_C)), names(stats_C)) end
+    
     XLSX.addsheet!(xf, "Intra_Comparison")
-    XLSX.writetable!(xf[4], collect(eachcol(df_res_intra)), names(df_res_intra))
+    if nrow(df_res_intra) > 0 XLSX.writetable!(xf[4], collect(eachcol(df_res_intra)), names(df_res_intra)) end
+    
     XLSX.addsheet!(xf, "Inter_Comparison")
-    XLSX.writetable!(xf[5], collect(eachcol(df_res_inter)), names(df_res_inter))
+    if nrow(df_res_inter) > 0 XLSX.writetable!(xf[5], collect(eachcol(df_res_inter)), names(df_res_inter)) end
+    
     XLSX.addsheet!(xf, "Inter_Details")
     if nrow(df_inter_details) > 0 XLSX.writetable!(xf[6], collect(eachcol(df_inter_details)), names(df_inter_details)) end
 end
-
 println("✅ Execução e Análise concluídas. Resultados e gráficos salvos em: $dir_resultados")

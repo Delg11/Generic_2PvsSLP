@@ -185,7 +185,7 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
     theta1 = 1.0;
     theta2 = 1.0;
     thetaMax = 1.0
-    GUROBI_ENV = Gurobi.Env()
+    # GUROBI_ENV = Gurobi.Env(output_flag=0)
     lambda = zeros(m)
 
     if params_slp.verbose
@@ -228,7 +228,7 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
         # -------------------------------------------------
         # 1. Definir e Resolver Modelo LP
         # -------------------------------------------------
-        model = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GUROBI_ENV), "OutputFlag" => params_slp.output_flag))
+        model = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), "OutputFlag" => params_slp.output_flag))
 
         @variable(model, s[i = 1:n])
         @objective(model, Min, dot(grad, s))
@@ -265,7 +265,7 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
             params_slp.debugverbose && println("⚠️ [DEBUG-SLP] Subproblem infeasible/failed. Entering RESTORATION phase.")
             # Modo de Recuperação (Relaxamento)
             current_phase = :restoration
-            model2 = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GUROBI_ENV), "OutputFlag" => params_slp.output_flag))
+            model2 = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), "OutputFlag" => params_slp.output_flag))
             @variable(model2, s2[i = 1:n])
             @variable(model2, z >= 0)
 

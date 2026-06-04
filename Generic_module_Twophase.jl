@@ -53,10 +53,11 @@ end
 Create JuMP model for restoration or optimization phase
 """
 function create_optimized_model(solver_choice::Symbol, phase::Symbol, n::Int, m::Int; env::Union{Gurobi.Env, Nothing}=nothing)
-    # Create base model
+# Create base model
     model = if solver_choice == :gurobi
-        env = (env === nothing) ? Gurobi.Env() : env
-        Model(optimizer_with_attributes(() -> Gurobi.Optimizer(env), "OutputFlag" => 0, "TimeLimit" => 1))
+        # Usa a constante global em vez de criar um novo env
+        Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), "OutputFlag" => 0))
+        
     elseif solver_choice == :highs
         Model(optimizer_with_attributes(HiGHS.Optimizer, "output_flag" => false, "threads" => Threads.nthreads(), "primal_feasibility_tolerance" => 1e-8, "dual_feasibility_tolerance" => 1e-8))
     else
@@ -949,9 +950,10 @@ function two_phase_optimization(
         end
 
         # Create models
-        const_env = Gurobi.Env()
-        model_restaura = create_optimized_model(solver_choice, :restauracao, n, m; env=const_env)
-        model_opt = create_optimized_model(solver_choice, :otimizacao, n, m; env=const_env)
+        # const_env = Gurobi.Env()
+        # const const_env = Gurobi.Env(OutputFlag=0)
+        model_restaura = create_optimized_model(solver_choice, :restauracao, n, m; env=GRB_ENV)
+        model_opt = create_optimized_model(solver_choice, :otimizacao, n, m; env=GRB_ENV)
 
         # Table header
         log_message!(repeat("=", 120), logio; verbose=verbose)

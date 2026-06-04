@@ -5,6 +5,7 @@ Pkg.activate(@__DIR__)
 
 # Lista apenas pacotes externos
 pacotes_externos = [
+    "ArgParse",
     "CUTEst",
     "DataFrames",
     "XLSX",

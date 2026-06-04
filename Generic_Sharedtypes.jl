@@ -1,10 +1,12 @@
 module SharedTypes
 
-export StepLog, StepLog_SLP, StepLog_TwoPhase, OptimizationProblem, OptimizedBuffers, TwoPhaseParams, SLPParams, create_rosenbrock_problem0, create_rosenbrock_problem1, build_optimization_problem
+export StepLog, StepLog_SLP, StepLog_TwoPhase, OptimizationProblem, OptimizedBuffers, TwoPhaseParams, SLPParams, create_rosenbrock_problem0, create_rosenbrock_problem1, build_optimization_problem, GRB_ENV
 
-using ADNLPModels, NLPModels
+using ADNLPModels, NLPModels, Gurobi
 
+const GRB_ENV = Gurobi.Env(output_flag=0)
 
+# const GRB_ENV = Gurobi.Env(OutputFlag=0)
 # 1. Definir um tipo pai (abstrato)
 abstract type AbstractStepLog end
 
