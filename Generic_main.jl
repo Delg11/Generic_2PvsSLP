@@ -37,15 +37,15 @@ using .Generic_module_slp
 # 2. CONFIGURAÇÃO DE ARGUMENTOS DE LINHA DE COMANDO
 # ==============================================================================
 function parse_commandline()
-    s = ArgParseSettings(description="Benchmark de Otimização SLP e TwoPhase")
+    s = ArgParseSettings(description="Benchmark de Otimização SLP e TwoPhase - Execução Remota")
 
     @add_arg_table s begin
         "--mode", "-m"
-            help = "Modo de execução: 'test' para lista fixa de problemas ou 'filter' para buscar no CUTEst."
+            help = "Modo de execução: 'test' ou 'filter'."
             arg_type = String
             default = "test"
         "--problems", "-p"
-            help = "Lista de problemas separados por vírgula (usado apenas no modo 'test')."
+            help = "Lista de problemas separados por vírgula."
             arg_type = String
             default = "HS6,ROSENBR"
         "--max-var", "-v"
@@ -56,6 +56,38 @@ function parse_commandline()
             help = "Número máximo de restrições (-1 para sem limite)."
             arg_type = Int
             default = -1
+        "--run-slp"
+            help = "Executa as variantes do SLP (true/false)."
+            arg_type = Bool
+            default = true
+        "--run-twophase"
+            help = "Executa as variantes do Two-Phase (true/false)."
+            arg_type = Bool
+            default = true
+        
+        # Parâmetros do Two-Phase
+        "--tp-bq"
+            help = "Passo parabólico (Two-Phase). Opções: 'all', 'true', 'false'."
+            arg_type = String
+            default = "all"
+        "--tp-atr"
+            help = "Região anisotrópica (Two-Phase). Opções: 'all', 'true', 'false'."
+            arg_type = String
+            default = "all"
+        "--tp-uru"
+            help = "Ratio update (Two-Phase). Opções: 'all', 'true', 'false'."
+            arg_type = String
+            default = "all"
+            
+        # Parâmetros do SLP
+        "--slp-bq"
+            help = "Passo parabólico (SLP). Opções: 'all', 'true', 'false'."
+            arg_type = String
+            default = "all"
+        "--slp-atr"
+            help = "Região anisotrópica (SLP). Opções: 'all', 'true', 'false'."
+            arg_type = String
+            default = "all"
     end
 
     return parse_args(s)
@@ -152,7 +184,6 @@ function plot_performance_profile_fbest(df, variants_to_compare, title_suffix;
     
     return p
 end
-
 # ==============================================================================
 # 4. CONFIGURAÇÃO GERAL E SELEÇÃO DE ALGORITMOS
 # ==============================================================================
@@ -160,8 +191,8 @@ println("\n" * "=" ^ 80)
 println("⚙️ CONFIGURANDO VARIANTES E AMBIENTE DE EXPORTAÇÃO")
 println("=" ^ 80)
 
-const RUN_TWOPHASE = true
-const RUN_SLP      = true
+const RUN_TWOPHASE = args["run-twophase"]
+const RUN_SLP      = args["run-slp"]
 
 common_max_iter = 500
 common_delta0   = 0.1
@@ -176,6 +207,7 @@ dir_resultados = "Resultados_Benchmark_$(data_hora_atual)"
 mkpath(dir_resultados)
 println("📁 Diretório de resultados criado: $dir_resultados")
 
+# --- FUNÇÕES BUILDER ---
 function build_twophase_params(M, bq, atr, uru)
     return TwoPhaseParams(
         max_outer_iter = common_max_iter, δ0_opt = common_delta0, δ0_resto = common_delta0,
@@ -187,16 +219,6 @@ function build_twophase_params(M, bq, atr, uru)
     )
 end
 
-variantes_twophase = []
-if RUN_TWOPHASE
-    for M in [1], bq in [false, true], atr in [false, true], uru in [true]
-        if !bq && atr continue end 
-        is_base = (M == 1 && !bq && !atr && !uru)
-        nome = is_base ? "BASE_2P" : "2P_M$(M)_BQ$(Int(bq))_ATR$(Int(atr))_URU$(Int(uru))"
-        push!(variantes_twophase, (nome=nome, is_base=is_base, params=build_twophase_params(M, bq, atr, uru), M=M, BQ=bq, ATR=atr, URU=uru))
-    end
-end
-
 function build_slp_params(bq, atr)
     return SLPParams(
         delta0 = common_delta0, tolG = common_tolG, tolF = common_tolF, tolS = common_tolS,
@@ -205,13 +227,43 @@ function build_slp_params(bq, atr)
     )
 end
 
+# --- PROCESSAMENTO TWO-PHASE ---
+variantes_twophase = []
+if RUN_TWOPHASE
+    tp_uru_opts = args["tp-uru"] == "all" ? [false, true] : (args["tp-uru"] == "true" ? [true] : [false])
+    tp_bq_opts  = args["tp-bq"]  == "all" ? [false, true] : (args["tp-bq"]  == "true" ? [true] : [false])
+    tp_atr_opts = args["tp-atr"] == "all" ? [false, true] : (args["tp-atr"] == "true" ? [true] : [false])
+    
+    M = 1
+    for uru in tp_uru_opts, bq in tp_bq_opts, atr in tp_atr_opts
+        if !bq && atr continue end # Restrição lógica: ATR requer BQ
+        
+        is_base = (M == 1 && !bq && !atr && !uru)
+        nome = is_base ? "BASE_2P" : "2P_M$(M)_BQ$(Int(bq))_ATR$(Int(atr))_URU$(Int(uru))"
+        
+        push!(variantes_twophase, (
+            nome=nome, is_base=is_base, params=build_twophase_params(M, bq, atr, uru), 
+            M=M, BQ=bq, ATR=atr, URU=uru
+        ))
+    end
+end
+
+# --- PROCESSAMENTO SLP ---
 variantes_slp = []
 if RUN_SLP
-    for bq in [false, true], atr in [false, true]
-        if !bq && atr continue end 
+    slp_bq_opts  = args["slp-bq"]  == "all" ? [false, true] : (args["slp-bq"]  == "true" ? [true] : [false])
+    slp_atr_opts = args["slp-atr"] == "all" ? [false, true] : (args["slp-atr"] == "true" ? [true] : [false])
+
+    for bq in slp_bq_opts, atr in slp_atr_opts
+        if !bq && atr continue end # Restrição lógica: ATR requer BQ
+        
         is_base = (!bq && !atr)
         nome = is_base ? "BASE_SLP" : "SLP_BQ$(Int(bq))_ATR$(Int(atr))"
-        push!(variantes_slp, (nome=nome, is_base=is_base, params=build_slp_params(bq, atr), BQ=bq, ATR=atr))
+        
+        push!(variantes_slp, (
+            nome=nome, is_base=is_base, params=build_slp_params(bq, atr), 
+            BQ=bq, ATR=atr
+        ))
     end
 end
 
@@ -223,7 +275,6 @@ df_twophase = DataFrame(Problema=String[], nvar=Int[], ncon=Int[], Variante=Stri
 df_slp = DataFrame(Problema=String[], nvar=Int[], ncon=Int[], Variante=String[], 
                    BQ=Bool[], ATR=Bool[], Status=String[], Iteracoes=Int[], 
                    Tempo_ms=Float64[], f_final=Float64[], h_norm=Float64[], Is_Base=Bool[])
-
 # ==============================================================================
 # 5. SELEÇÃO DE PROBLEMAS E LOOP PRINCIPAL
 # ==============================================================================

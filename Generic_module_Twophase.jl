@@ -822,9 +822,19 @@ function optimization_phase(
         
         # Atualização (Aumento) da região de confiança
         if !params.backtracking_quadratic
-            δ_old = copy(δ)
-            δ = min.(δ ./ params.τ3, params.δmax)
-            params.debugverbose && println("🔍 [DEBUG-OPT] Trust Region expanded from $δ_old to $δ")
+            # Calcula as reduções
+            ared = L_y_lambda - L_zj_lambda
+            pred = L_y_lambda - f_model
+            
+            # Limiar de aceitação estrita para expansão (0.5 padrão para SLP)
+            rho_slp = 0.5
+            
+            # Condição segura usando multiplicação: ared >= rho * pred
+            if ared >= rho_slp * pred
+                δ_old = copy(δ)
+                δ = min.(δ ./ params.τ3, params.δmax)
+                params.debugverbose && println("🔍 [DEBUG-OPT] Trust Region expanded from $δ_old to $δ")
+            end
         else
             params.debugverbose && println("🔍 [DEBUG-OPT] Applying Quadratic Backtracking for Trust Region expansion.")
             s_inf = norm(buffers.s_val, Inf)
