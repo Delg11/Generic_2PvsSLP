@@ -326,6 +326,39 @@ function get_status_string(status_code::Int)
     else return "UNKNOWN_$(status_code)" end
 end
 
+# ==============================================================================
+# 5.1 WARM-UP (PRÉ-COMPILAÇÃO JIT)
+# ==============================================================================
+println("\n🔥 EXECUTANDO WARM-UP (Pré-compilação JIT)...")
+try
+    # Utiliza o primeiro problema da lista para garantir que os métodos sejam compilados
+    warmup_prob_name = problems[1] 
+    nlp_w = CUTEstModel{Float64}(warmup_prob_name)
+    prob_w = SharedTypes.build_optimization_problem(nlp_w)
+    x0_w = clamp.(nlp_w.meta.x0, prob_w.xl, prob_w.xu)
+
+    if RUN_TWOPHASE && length(variantes_twophase) > 0
+        print("  Compilando Two-Phase... ")
+        two_phase_optimization(prob_w, x0_w, variantes_twophase[1].params; solver_choice=:gurobi, use_quadratic=false, history=false)
+        println("OK")
+    end
+
+    if RUN_SLP && length(variantes_slp) > 0
+        print("  Compilando SLP... ")
+        solve_slp_trust_region(prob_w, x0_w, variantes_slp[1].params)
+        println("OK")
+    end
+    
+    finalize(nlp_w)
+    println("✅ WARM-UP CONCLUÍDO. Iniciando cronometragem oficial.")
+catch e
+    println("⚠️ Aviso: Falha no warm-up ($e). O primeiro tempo oficial pode ser inflado.")
+end
+
+# ==============================================================================
+# 5.2 LOOP PRINCIPAL
+# ==============================================================================
+
 for prob_name in problems
     local nlp = nothing
     try
