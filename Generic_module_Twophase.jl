@@ -2,7 +2,7 @@ module Generic_module_Twophase
 
 export create_optimized_model, restoration_phase, optimization_phase, two_phase_optimization
 
-using JuMP, Gurobi, Printf, LinearAlgebra
+using JuMP, Gurobi, Printf, LinearAlgebra, RipQP
 using ..SharedTypes
 # ==============================================================================
 # UTILITY FUNCTIONS
@@ -45,6 +45,48 @@ Compute merit function value
     return θ * (F + dot(h, λ)) + (1 - θ) * norm(h)
 end
 
+
+"""
+    compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{Float64}, σ_fallback::Float64)
+
+Calcula a matriz diagonal B_k para o subproblema quadrático.
+
+Estratégias:
+   • :identity   → B = σ_fallback * I
+   • :spectral   → B = α I (espectral puro com salvaguardas)
+"""
+function compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{Float64}, σ_fallback::Float64, problem::OptimizationProblem)
+    if strategy == :exact
+        # Use the exact Hessian of the Lagrangian at the current point
+        B_exact = problem.∇²L(buffers.x_temp, buffers.λ)
+        return B_exact
+    end
+    if strategy == :identity
+        return σ_fallback * spdiagm(0 => ones(n))
+        
+    elseif strategy == :spectral
+        if norm(s) < 1e-8 || norm(y_grad) < 1e-8
+            return σ_fallback * spdiagm(0 => ones(n))
+        end
+
+        sTy = dot(s, y_grad)
+        yTy = dot(y_grad, y_grad)
+
+        if sTy <= 1e-12
+            return σ_fallback * spdiagm(0 => ones(n))
+        end
+
+        alpha = yTy / sTy
+        alpha = clamp(alpha, 1e-4, 1e4)
+
+        return alpha * spdiagm(0 => ones(n))
+        
+    else
+        error("Estratégia desconhecida para cálculo de B: $strategy")
+    end
+end
+
+end  # fim do módulo MatrixApproximationsModule
 # ==============================================================================
 # JUMP MODEL CREATION
 # ==============================================================================
@@ -490,69 +532,77 @@ end
 Solve optimization subproblem
 min ∇f'·s  s.t. ∇h'·s = -h, bounds
 """
-function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::Union{Float64, Vector{Float64}}, problem::OptimizationProblem, use_quadratic::Bool, buffers::OptimizedBuffers)
+"""
+Solve optimization subproblem
+min ∇f'·s  s.t. ∇h'·s = 0, bounds
+"""
+function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::Union{Float64, Vector{Float64}}, problem::OptimizationProblem, buffers::OptimizedBuffers)
     m = length(buffers.h_old)
     grad_L = buffers.∇f + transpose(buffers.∇h) * buffers.λ
-    if use_quadratic
-        # Use RipQP for quadratic model
-        H = problem.∇²L(buffers.x_temp, zeros(m))
-        Hqp = 0.5 * H + spdiagm(0 => -0.1 * ones(n))
 
+    # 1. Define quadratic matrix (Exact Hessian or Approximation B)
+    local Hqp
+    if params.use_quadratic
+        # Apply regularization
+        Hqp = B + spdiagm(0 => params.σ * ones(n)) 
+    end
+
+    # 2. Solve via RipQP (QuadraticModels)
+    if params.use_quadratic && params.quadratic_solver == :ripqp
         # Calculate bounds: max(xl-x, -δ) ≤ s ≤ min(xu-x, δ)
         for i in 1:n
             d_val = (δ isa Vector) ? δ[i] : δ
-
             lx = problem.xl[i] - buffers.x_temp[i]
             ux = problem.xu[i] - buffers.x_temp[i]
             buffers.lvar[i] = max(lx, -d_val)
             buffers.uvar[i] = min(ux, d_val)
         end
 
-        qm = QuadraticModel(buffers.∇f, Hqp; A=buffers.∇h, lcon=(-buffers.h_old), ucon=(-buffers.h_old), lvar=buffers.lvar, uvar=buffers.uvar, c0=0.0, name="OptSubproblem")
+        # Tangent step: constraints are ∇h'·s = 0
+        qm = QuadraticModel(buffers.∇f, Hqp; 
+                            A=buffers.∇h, 
+                            lcon=zeros(m), 
+                            ucon=zeros(m), 
+                            lvar=buffers.lvar, 
+                            uvar=buffers.uvar, 
+                            c0=0.0, 
+                            name="OptSubproblem")
 
-        stats = ripqp(qm)
+        stats = ripqp(qm, display=false)
 
-        if stats.status == :first_order
+        if stats.status == :first_order || stats.status == :acceptable
             copy!(buffers.s_val, stats.solution)
             buffers.λ = stats.multipliers[1:m]
             return true, -dot(buffers.∇f, stats.solution)
         end
     end
 
-    # JuMP-based solution
-
+    # 3. Solve via JuMP (Gurobi for QP or any solver for LP)
     s = model[:s]
     con = model[:con]
 
-    # Update bounds: max(xl-x, -δ) ≤ s ≤ min(xu-x, δ)
+    # Update variable bounds
     @inbounds for i in 1:n
         d_val = (δ isa Vector) ? δ[i] : δ
-
         lx = problem.xl[i] - buffers.x_temp[i]
         ux = problem.xu[i] - buffers.x_temp[i]
 
-        lower = max(lx, -d_val)
-        upper = min(ux, d_val)
-
-        set_lower_bound(s[i], lower)
-        set_upper_bound(s[i], upper)
+        set_lower_bound(s[i], max(lx, -d_val))
+        set_upper_bound(s[i], min(ux, d_val))
     end
 
-    # Update objective
-    if use_quadratic
-        H = problem.∇²L(buffers.x_temp, zeros(m))
-        @objective(model, Min, 0.5 * dot(s, H * s) + dot(buffers.∇f, s))
+    # Update objective function
+    if params.use_quadratic
+        # SQP mode via JuMP
+        @objective(model, Min, 0.5 * dot(s, Hqp * s) + dot(buffers.∇f, s))
     else
-        # @objective(model, Min, sum(buffers.∇f[i] * s[i] for i in 1:n))
-        # SLP: min ∇L' * s
+        # SLP mode
         @objective(model, Min, dot(grad_L, s))
     end
 
-    # Update constraints: ∇h'·s = -h
+    # Update constraints: Tangent step ∇h'·s = 0
     @inbounds for i in 1:m
-        # set_normalized_rhs(con[i], -buffers.h_old[i])
         set_normalized_rhs(con[i], 0.0)
-
         for j in 1:n
             set_normalized_coefficient(con[i], s[j], buffers.∇h[i, j])
         end
@@ -561,24 +611,21 @@ function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::Union{Flo
     optimize!(model)
 
     if termination_status(model) == MOI.OPTIMAL
-        # Extract solution
+        # Extract primal solution
         @inbounds for i in 1:n
             buffers.s_val[i] = value(s[i])
         end
-
-        obj_val = objective_value(model)
 
         # Extract dual variables
         for i in 1:m
             buffers.λ[i] = dual(con[i])
         end
 
-        return true, obj_val
+        return true, objective_value(model)
     end
 
     return false, 0.0
 end
-
 
 
 """
@@ -594,7 +641,6 @@ function optimization_phase(
     model_opt::JuMP.Model,
     params;
     θ_k::Float64=0.5,          # Passo 0: Parâmetro de penalidade da iteração k
-    use_quadratic::Bool=false,
     verbose::Bool=params.verbose_in,
     buffers::OptimizedBuffers,
     full_log::Vector{StepLog_TwoPhase}=Vector{StepLog_TwoPhase}(),
@@ -639,8 +685,8 @@ function optimization_phase(
         # PASSO 2: Encontrar z^{ℓ,j} resolvendo o subproblema
         # PASSO 3: Escolher λ 
         # =========================================================
-        success, f_model = solve_optimization_subproblem!(model_opt, n, δ, problem, use_quadratic, buffers)
-        buffers.λ .= 0.0
+        success, f_model = solve_optimization_subproblem!(model_opt, n, δ, problem, buffers)
+        !params.use_quadratic && (buffers.λ .= 0.0)
         if !success
             δ = max.(params.τ2 .* δ, params.δmin)
             j += 1
@@ -715,7 +761,11 @@ function optimization_phase(
                     δ, L_y_lambda, L_zj_lambda, f_model, params, 
                     s_inf, step_norm_sq, :decrease; 
                     anisotropic=params.anisotropic_trust_region, 
-                    s_vec=buffers.s_val, grad=buffers.∇f, mode=backtracking_mode
+                    s_vec=buffers.s_val, grad=buffers.∇f, mode=backtracking_mode,
+                    min_reduction_ratio=params.parabolic_min_reduction_ratio,
+                    max_reduction_ratio=params.parabolic_max_reduction_ratio,
+                    min_increase_ratio=params.parabolic_min_increase_ratio,
+                    max_increase_ratio=params.parabolic_max_increase_ratio,
                 )
                 if params.anisotropic_trust_region && consecutive_rejects >= 2
                     was_corrected = enforce_aspect_ratio!(δ, 0.15)
@@ -866,13 +916,11 @@ function two_phase_optimization(
     problem::OptimizationProblem,
     x0::Vector{Float64},
     params::TwoPhaseParams;
-    solver_choice::Symbol=:gurobi,
-    use_quadratic::Bool=false,
     max_outer_iter::Int=params.max_outer_iter,
     tolerance::Float64=params.tol,
     history::Bool=true,
 )
-
+    solver_choice=params.general_solver
     verbose=params.verbose_out
     # println(params)
     logio = nothing
@@ -899,6 +947,7 @@ function two_phase_optimization(
         δr = params.anisotropic_trust_region ? fill(params.δ0_resto, n) : params.δ0_resto
         δo = params.anisotropic_trust_region ? fill(params.δ0_opt, n) : params.δ0_opt
         iter = 0
+        B   = params.use_quadratic ? spdiagm(0 => ones(n)) : nothing
 
         # Contadores de convergência
         countG = 0
@@ -965,26 +1014,27 @@ function two_phase_optimization(
         model_restaura = create_optimized_model(solver_choice, :restauracao, n, m; env=GRB_ENV)
         model_opt = create_optimized_model(solver_choice, :otimizacao, n, m; env=GRB_ENV)
 
-        # Table header
+# Table header
         log_message!(repeat("=", 120), logio; verbose=verbose)
         log_message!("                    TWO-PHASE OPTIMIZATION - ALGORITHM 4.3", logio; verbose=verbose)
         log_message!(repeat("=", 120), logio; verbose=verbose)
 
         if params.use_slp_stopping
-            msg = @sprintf("%-4s %-12s %-10s %-8s %-8s %-10s %-10s %-18s", "k", "f(xᵏ)", "||h(xᵏ)||", "δr", "δo", "||Δx||", "||gpnorm||", "(G|F|S)")
+            msg = @sprintf("%-4s %-12s %-10s %-8s %-8s %-9s %-10s %-10s %-18s", "k", "f(xᵏ)", "||h(xᵏ)||", "δr", "δo", "||λ||", "||Δx||", "||gpnorm||", "(G|F|S)")
         else
-            msg = @sprintf("%-4s %-12s %-10s %-8s %-8s %-10s  %-10s", "k", "f(xᵏ)", "||h(xᵏ)||", "δr", "δo", "||gpnorm||", "||Δx||")
+            msg = @sprintf("%-4s %-12s %-10s %-8s %-8s %-9s %-10s  %-10s", "k", "f(xᵏ)", "||h(xᵏ)||", "δr", "δo", "||λ||", "||gpnorm||", "||Δx||")
         end
         log_message!(msg, logio; verbose=verbose)
         log_message!(repeat("-", 120), logio; verbose=verbose)
 
         d_r_print = (δr isa Vector) ? maximum(δr) : δr
         d_o_print = (δo isa Vector) ? maximum(δo) : δo
+        lambda_print_init = norm(λ)
 
         if params.use_slp_stopping
-            msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-10s %-10.3e %-18s", 0, f_current, norm_h_current, d_r_print, d_o_print, "-", gpnorm, "0|0|0")
+            msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10s %-10.3e %-18s", 0, f_current, norm_h_current, d_r_print, d_o_print, lambda_print_init, "-", gpnorm, "0|0|0")
         else
-            msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-10.3e %-10s", 0, f_current, norm_h_current, d_r_print, d_o_print, gpnorm, "-")
+            msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10s", 0, f_current, norm_h_current, d_r_print, d_o_print, lambda_print_init, gpnorm, "-")
         end
         log_message!(msg, logio; verbose=verbose)
 
@@ -1044,16 +1094,25 @@ function two_phase_optimization(
             # ================================================================
             # STEP 2: OPTIMIZATION PHASE
             # ================================================================
+            if params.use_quadratic
+                if norm(buffers.s_val) > 1e-12
+                    y_diff = buffers.∇f .- buffers.∇f_old
+                    B = compute_B(params.B_update_strategy, n, buffers.s_val, y_diff, params.σ)
+                else
+                    B = params.σ * spdiagm(0 => ones(n))
+                end
+            end
+
             x_new, λ_new, θ_new, δo, success_opt = optimization_phase(
                 problem, 
-                x_old_outer,      # x^k (Ponto antes da restauração)
-                λ,                # λ^k (Multiplicadores da iteração anterior)
-                norm_h_old,       # ||h(x^k)||
-                y,                # y^k (Ponto após a restauração)
+                x_old_outer,      
+                λ,                
+                norm_h_old,       
+                y,                
                 δo, 
                 model_opt, 
                 params; 
-                θ_k = θ,          # θ_k (Passado como kwarg)
+                θ_k = θ,          
                 verbose = params.verbose_in, 
                 buffers = buffers, 
                 full_log = full_log, 
@@ -1061,10 +1120,6 @@ function two_phase_optimization(
                 lagrangian_history = lagrangian_history,
                 merit_history = merit_history
             )
-
-            # if !success_opt
-            #     δo = max.(params.τ1 .* δo, params.δmin)
-            # end
 
             # ================================================================
             # STEP 3: UPDATE AND LOG
@@ -1127,7 +1182,7 @@ function two_phase_optimization(
                 end
 
                 if Δx <= params.tolS
-                    countS += 1 # mudar para 1 se quiser contar passo pequeno, ou manter 0 para só considerar passo pequeno se for consecutivo
+                    countS += 1
                 else
                     countS = 0
                 end
@@ -1155,12 +1210,13 @@ function two_phase_optimization(
 
             d_r_print = (δr isa Vector) ? maximum(δr) : δr
             d_o_print = (δo isa Vector) ? maximum(δo) : δo 
+            lambda_print = norm(λ)
 
             # Log formatado espelhando a topologia
             if params.use_slp_stopping
-                msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-10.3e %-10.3e %d|%d|%d%s", iter, f_new, norm_h_new, d_r_print, d_o_print, Δx, gpnorm, countG, countF, countS, status_symbol)
+                msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10.3e %d|%d|%d%s", iter, f_new, norm_h_new, d_r_print, d_o_print, lambda_print, Δx, gpnorm, countG, countF, countS, status_symbol)
             else
-                msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-10.3e %-10.3e %s", iter, f_new, norm_h_new, d_r_print, d_o_print, gpnorm, Δx, status_symbol)
+                msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10.3e %s", iter, f_new, norm_h_new, d_r_print, d_o_print, lambda_print, gpnorm, Δx, status_symbol)
             end
             log_message!(msg, logio; verbose=verbose)
 
@@ -1168,7 +1224,6 @@ function two_phase_optimization(
             h_current = h_new
             norm_h_current = norm_h_new
         end
-
         # ================================================================
         # FINALIZATION
         # ================================================================

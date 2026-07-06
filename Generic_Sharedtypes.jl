@@ -82,6 +82,9 @@ end
 # ==============================================================================
 
 Base.@kwdef mutable struct TwoPhaseParams
+
+    # General solver
+    general_solver::Symbol = :gurobi
     # Restoration phase parameters
     r_resto::Float64 = 0.9
     rfeas::Float64 = 1e-12
@@ -116,6 +119,16 @@ Base.@kwdef mutable struct TwoPhaseParams
     ratio_safeguard_tol::Float64 = 1e-12
     ratio_max_factor::Float64 = 2.0
     ratio_min_factor::Float64 = 0.1
+    parabolic_min_reduction_ratio::Float64=0.1,
+    parabolic_max_reduction_ratio::Float64=0.5,
+    parabolic_min_increase_ratio::Float64=1.0,
+    parabolic_max_increase_ratio::Float64=2.0,
+
+    # Sequential Quadratic Programming (SQP) parameters
+    use_quadratic::Bool = false
+    quadratic_solver::Symbol = :ripqp
+    σ::Float64 = 0                  # (H+σI) para regularização do subproblema quadrático
+    B_update_strategy::Symbol = :identity  # Hessian update strategy: :identity, :spectral, :exact
 
     # SLP stopping criteria
     maxcount::Int = 3
