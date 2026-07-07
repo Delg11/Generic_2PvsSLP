@@ -2,7 +2,7 @@ module Generic_module_slp
 
 export solve_slp_trust_region
 
-using NLPModels, Printf, JuMP, Gurobi, LinearAlgebra
+using NLPModels, Printf, JuMP, Gurobi, LinearAlgebra, RipQP,SparseArrays, QuadraticModels
 using ..SharedTypes
 
 """
@@ -59,7 +59,7 @@ function quadratic_backtracking_step!(
             if a_global < params.ratio_safeguard_tol
                 fallback = max(δ_scalar * params.τ1, s_norm * params.τ2)
                 d_val = clamp(fallback, params.δmin, params.δmax)
-                return fill(d_val, length(δ_current))
+                    return (δ_current isa Vector) ? fill(d_val, length(δ_current)) : d_val
             end
 
             theo = -b_global / (2.0 * a_global)
@@ -147,6 +147,36 @@ function quadratic_backtracking_step!(
     return δ_new
 end
 
+function compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{Float64}, σ_fallback::Float64, problem::OptimizationProblem, x_new::Vector{Float64}, λ::Vector{Float64})
+    if strategy == :exact
+        # Use the exact Hessian of the Lagrangian at the current point
+        B_exact = problem.∇²L(x_new, λ)
+        return B_exact
+    end
+    if strategy == :identity
+        return σ_fallback * spdiagm(0 => ones(n))
+        
+    elseif strategy == :spectral
+        if norm(s) < 1e-8 || norm(y_grad) < 1e-8
+            return σ_fallback * spdiagm(0 => ones(n))
+        end
+
+        sTy = dot(s, y_grad)
+        yTy = dot(y_grad, y_grad)
+
+        if sTy <= 1e-12
+            return σ_fallback * spdiagm(0 => ones(n))
+        end
+
+        alpha = yTy / sTy
+        alpha = clamp(alpha, 1e-4, 1e4)
+
+        return alpha * spdiagm(0 => ones(n))
+        
+    else
+        error("Estratégia desconhecida para cálculo de B: $strategy")
+    end
+end
 
 # ==============================================================================
 # MAIN SLP SOLVER (Logic adapted from StrSLP.jl)
@@ -157,9 +187,10 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
     # n, m = prob.n, prob.m
     n = length(x)
     m = length(prob.h(x))
-
+    s_sol = zeros(n)
     F = prob.f(x)
     grad = prob.∇f(x)
+    grad_old = copy(grad)
     h_val = prob.h(x)
     jac = prob.∇h(x)
     if params_slp.anisotropic_trust_region
@@ -225,69 +256,117 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
         params_slp.debugverbose && println("\n🔍 [DEBUG-SLP] === Iteration $(iter+1) started ===")
         params_slp.debugverbose && println("🔍 [DEBUG-SLP] Current State: F(x) = $F, aredfsb = $feas_violation, delta = $delta")
 
-        # -------------------------------------------------
-        # 1. Definir e Resolver Modelo LP
-        # -------------------------------------------------
-        model = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), "OutputFlag" => params_slp.output_flag))
-
-        @variable(model, s[i = 1:n])
-        @objective(model, Min, dot(grad, s))
-
-        # Restrições Linearizadas: jac * s <= -h(x)
-        lp_cons = nothing
-        if m > 0
-            lp_cons = @constraint(model, jac * s .== -h_val)
+        if params_slp.use_quadratic
+            if norm(s_sol) > 1e-12
+                y_diff = grad .- grad_old
+                B = compute_B(params_slp.B_update_strategy, n, s_sol, y_diff, params_slp.σ, prob, x,lambda)
+            else
+                B = params_slp.σ * spdiagm(0 => ones(n))
+            end
         end
 
         # Box Constraints Trust Region
         sL = max.(prob.xl .- x, -delta)
         sU = min.(prob.xu .- x, delta)
-        for i in 1:n
-            set_lower_bound(s[i], sL[i]);
-            set_upper_bound(s[i], sU[i]);
-        end
-
-        optimize!(model)
-        status = termination_status(model)
 
         s_sol = zeros(n)
         lp_obj_val = 0.0
         current_phase = :optimization
+        success_opt = false
 
-        if status == MOI.OPTIMAL
-            s_sol = value.(s)
-            lp_obj_val = objective_value(model)
-            if m > 0
-                lambda = dual.(lp_cons);
+
+
+        # 1. Preparação da Matriz Hessiana
+        local Hqp
+        params_slp.use_quadratic && (Hqp = B + spdiagm(0 => params_slp.σ * ones(n)))
+
+        # 2. Resolução do Subproblema Principal
+        if params_slp.use_quadratic && params_slp.quadratic_solver == :ripqp
+            # -------------------------------------------------
+            # Fluxo RipQP
+            # -------------------------------------------------
+            qm = QuadraticModel(grad, Hqp; A = jac, lcon = -h_val, ucon = -h_val, lvar = sL, uvar = sU, c0 = 0.0)
+            
+            stats = ripqp(qm, display=(params_slp.output_flag == 1))
+            # println(stats)
+            if stats.status == :first_order || stats.status == :acceptable
+                s_sol = stats.solution
+                lp_obj_val = stats.objective
+                if m > 0
+                    lambda = stats.multipliers[1:m]
+                end
+                success_opt = true
+                params_slp.debugverbose && println("🔍 [DEBUG-SQP] Subproblem solved optimally (RipQP). obj_val = $lp_obj_val")
             end
-            params_slp.debugverbose && println("🔍 [DEBUG-SLP] Subproblem solved optimally. lp_obj_val = $lp_obj_val")
+            
         else
+            # -------------------------------------------------
+            # Fluxo Original (JuMP + Gurobi)
+            # -------------------------------------------------
+            model = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), "OutputFlag" => params_slp.output_flag))
+
+            @variable(model, s[i = 1:n])
+            
+            if params_slp.use_quadratic
+                @objective(model, Min, 0.5 * dot(s, Hqp * s) + dot(grad, s))
+            else
+                @objective(model, Min, dot(grad, s))
+            end
+
+            # Restrições Linearizadas: jac * s == -h(x)
+            lp_cons = nothing
+            if m > 0
+                lp_cons = @constraint(model, jac * s .== -h_val)
+            end
+
+            for i in 1:n
+                set_lower_bound(s[i], sL[i])
+                set_upper_bound(s[i], sU[i])
+            end
+
+            optimize!(model)
+            
+            if termination_status(model) == MOI.OPTIMAL
+                s_sol = value.(s)
+                lp_obj_val = objective_value(model)
+                if m > 0
+                    lambda = dual.(lp_cons)
+                end
+                success_opt = true
+                mode_str = params_slp.use_quadratic ? "SQP" : "SLP"
+                params_slp.debugverbose && println("🔍 [DEBUG-$mode_str] Subproblem solved optimally (Gurobi). obj_val = $lp_obj_val")
+            end
+        end
+
+        # 3. Restauration Phase (if subproblem fails)
+        if !success_opt
             params_slp.debugverbose && println("⚠️ [DEBUG-SLP] Subproblem infeasible/failed. Entering RESTORATION phase.")
-            # Modo de Recuperação (Relaxamento)
+            
             current_phase = :restoration
             model2 = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), "OutputFlag" => params_slp.output_flag))
+            
             @variable(model2, s2[i = 1:n])
-            @variable(model2, z >= 0)
 
             sL2 = max.(prob.xl .- x, -0.8 .* delta)
             sU2 = min.(prob.xu .- x, 0.8 .* delta)
             for i in 1:n
-                set_lower_bound(s2[i], sL2[i]);
-                set_upper_bound(s2[i], sU2[i]);
+                set_lower_bound(s2[i], sL2[i])
+                set_upper_bound(s2[i], sU2[i])
             end
 
-            @objective(model2, Min, z)
             if m > 0
-                @constraint(model2, jac * s2 .== -h_val .+ z);
+                @variable(model2, z_plus[1:m] >= 0)
+                @variable(model2, z_minus[1:m] >= 0)
+                
+                @objective(model2, Min, sum(z_plus) + sum(z_minus))
+                
+                @constraint(model2, jac * s2 .== -h_val .+ z_plus .- z_minus)
+            else
+                @objective(model2, Min, 0.0)
             end
-
-            # # Restaura a influência do gradiente para evitar passos em falso
-            # @objective(model2, Min, dot(grad, s2) + 1e5 * z)
-            # if m > 0
-            #     @constraint(model2, jac * s2 .== -h_val .+ z);
-            # end
 
             optimize!(model2)
+            
             if termination_status(model2) == MOI.OPTIMAL
                 s_sol = value.(s2)
                 lp_obj_val = dot(grad, s_sol)
@@ -307,13 +386,15 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
         F_trial = prob.f(x_trial)
         h_trial = prob.h(x_trial)
 
-        vio_curr = m > 0 ? sum(max.(0.0, h_val)) : 0.0
-        vio_trial = m > 0 ? sum(max.(0.0, h_trial)) : 0.0
 
-        # Violação PREDITA pelo modelo linear: h(x) + J*s <= 0
+        # # Correção: Norma L1 para restrições de igualdade (abs em vez de max)
+        vio_curr = m > 0 ? sum(abs.(h_val)) : 0.0
+        vio_trial = m > 0 ? sum(abs.(h_trial)) : 0.0
+
+        # Violação PREDITA pelo modelo linear: h(x) + J*s == 0
         if m > 0
             lin_approx = h_val .+ jac * s_sol
-            vio_lin_trial = sum(max.(0.0, lin_approx))
+            vio_lin_trial = sum(abs.(lin_approx))
         else
             vio_lin_trial = 0.0
         end
@@ -394,28 +475,47 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
         if step_accepted
             params_slp.debugverbose && println("✅ [DEBUG-SLP] >> STEP ACCEPTED <<")
             x = x_trial
-            Fold=F
+            Fold = F
             F = F_trial
+            grad_old = grad
             grad = prob.∇f(x)
             h_val = h_trial
             jac = prob.∇h(x)
             thetaMax = 1.0
 
             # Trust Region Update
-            delta_old = delta
-            if ared >= params_slp.rho * pred
-                if params_slp.backtracking_quadratic
-                    delta = quadratic_backtracking_step!(
-                                            delta, Fold, F_trial, slope_val, params_slp, snorm, norm(s_sol)^2, :increase;
-                                            anisotropic=params_slp.anisotropic_trust_region, s_vec=s_sol, grad=grad
-                                        )
+            delta_old = copy(delta)
+
+            if !params_slp.backtracking_quadratic
+                if params_slp.aredpred_ratio
+                    # Lógica tradicional baseada na razão de redução
+                    if ared >= params_slp.rho * pred
+                        delta = min.(params_slp.alphaA * delta, 1.0)
+                        params_slp.debugverbose && println("📈 [DEBUG-SLP] Great step! Trust Region expanded: $delta_old -> $delta (ρ >= $(params_slp.rho))")
+                    else
+                        params_slp.debugverbose && println("🔄 [DEBUG-SLP] Good step, but not great. Trust Region kept at: $delta (ρ < $(params_slp.rho))")
+                    end
                 else
-                delta = min.(params_slp.alphaA * delta, 1.0)
+                    # Expansão incondicional (Ablação do APR ativada)
+                    delta = min.(params_slp.alphaA * delta, 1.0)
+                    params_slp.debugverbose && println("📈 [DEBUG-SLP] Trust Region unconditionally expanded: $delta_old -> $delta")
                 end
-                params_slp.debugverbose && println("📈 [DEBUG-SLP] Great step! Trust Region expanded: $delta_old -> $delta (ρ >= $(params_slp.rho))")
             else
-                params_slp.debugverbose && println("🔄 [DEBUG-SLP] Good step, but not great. Trust Region kept at: $delta (ρ < $(params_slp.rho))")
+                # Lógica de expansão via modelo quadrático
+                params_slp.debugverbose && println("🔍 [DEBUG-SLP] Applying Quadratic Backtracking for Trust Region expansion.")
+                delta = quadratic_backtracking_step!(
+                    delta, Fold, F_trial, slope_val, params_slp, snorm, norm(s_sol)^2, :increase;
+                    anisotropic=params_slp.anisotropic_trust_region, 
+                    s_vec=s_sol, 
+                    grad=grad,                
+                    min_reduction_ratio=params_slp.parabolic_min_reduction_ratio,
+                    max_reduction_ratio=params_slp.parabolic_max_reduction_ratio,
+                    min_increase_ratio=params_slp.parabolic_min_increase_ratio,
+                    max_increase_ratio=params_slp.parabolic_max_increase_ratio,
+                )
             end
+            
+            # Limite inferior de segurança para o delta
             delta = max.(delta, 1e-4)
 
             # Grava no histórico limpo
@@ -423,11 +523,11 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
             itrej = 0
 
         else
-            delta_old = delta
+            delta_old = copy(delta)
             # Passo rejeitado: reduz a região de confiança
             if params_slp.backtracking_quadratic
                 
-                # === NOVA LÓGICA: Alternância Shrink / Reshape ===
+                # === Alternância Shrink / Reshape ===
                 # Se a iteração for par, usa :shrink. Se for ímpar, usa :reshape.
                 current_mode = (iter % 2 == 0) ? :shrink : :reshape
                 
@@ -438,7 +538,7 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
                     anisotropic=params_slp.anisotropic_trust_region, 
                     s_vec=s_sol, 
                     grad=grad,
-                    mode=current_mode # Passando o modo dinâmico aqui
+                    mode=current_mode
                 )
             else
                 # Fallback tradicional (seguro para escalar e vetor)

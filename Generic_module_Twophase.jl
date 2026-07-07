@@ -2,32 +2,30 @@ module Generic_module_Twophase
 
 export create_optimized_model, restoration_phase, optimization_phase, two_phase_optimization
 
-using JuMP, Gurobi, Printf, LinearAlgebra, RipQP
+using JuMP, Gurobi, Printf, LinearAlgebra, RipQP,SparseArrays, QuadraticModels
 using ..SharedTypes
+
 # ==============================================================================
 # UTILITY FUNCTIONS
 # ==============================================================================
-"""
-Força a região de confiança a manter uma proporção mínima saudável.
-Se uma dimensão for menor que `factor` vezes a maior dimensão, ela é inflada.
-Isso evita o efeito "agulha" que trava o algoritmo em vales diagonais.
-"""
+
+# Ensures the trust region maintains a healthy minimum aspect ratio.
+# If a dimension falls below the threshold relative to the maximum, it is inflated 
+# to prevent stagnation in diagonal valleys.
 function enforce_aspect_ratio!(δ::Vector{Float64}, min_ratio::Float64=1e-3) # rescale scale
     max_delta = maximum(δ)
     threshold = max_delta * min_ratio
-
     changed = false
     for i in 1:length(δ)
         if δ[i] < threshold
-            δ[i] = threshold # Re-infla a dimensão colapsada
+            δ[i] = threshold 
             changed = true
         end
     end
     return changed
 end
-"""
-Log message to console and/or file
-"""
+
+# Logs messages to the console and/or an IO stream
 function log_message!(msg, io; verbose=true)
     if verbose
         println(msg)
@@ -38,121 +36,93 @@ function log_message!(msg, io; verbose=true)
     end
 end
 
-"""
-Compute merit function value
-"""
+# Computes the merit function value combining objective and feasibility metrics
 @inline function compute_merit_functions(λ::Vector{Float64}, θ::Float64, h::Vector{Float64}, F::Float64)
     return θ * (F + dot(h, λ)) + (1 - θ) * norm(h)
 end
 
-
-"""
-    compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{Float64}, σ_fallback::Float64)
-
-Calcula a matriz diagonal B_k para o subproblema quadrático.
-
-Estratégias:
-   • :identity   → B = σ_fallback * I
-   • :spectral   → B = α I (espectral puro com salvaguardas)
-"""
-function compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{Float64}, σ_fallback::Float64, problem::OptimizationProblem)
+# Calculates the diagonal matrix B_k for the quadratic subproblem.
+# Supported strategies:
+#    • :identity  → B = σ_fallback * I
+#    • :spectral  → B = α I (pure spectral with safeguards)
+#    • :exact     → B = ∇²L(x, λ) (Exact Hessian of the Lagrangian)
+function compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{Float64}, σ_fallback::Float64, problem::OptimizationProblem, x_new::Vector{Float64}, λ::Vector{Float64})
     if strategy == :exact
-        # Use the exact Hessian of the Lagrangian at the current point
-        B_exact = problem.∇²L(buffers.x_temp, buffers.λ)
+        B_exact = problem.∇²L(x_new, λ)
         return B_exact
-    end
-    if strategy == :identity
+        
+    elseif strategy == :identity
         return σ_fallback * spdiagm(0 => ones(n))
         
     elseif strategy == :spectral
         if norm(s) < 1e-8 || norm(y_grad) < 1e-8
             return σ_fallback * spdiagm(0 => ones(n))
         end
-
         sTy = dot(s, y_grad)
         yTy = dot(y_grad, y_grad)
-
         if sTy <= 1e-12
             return σ_fallback * spdiagm(0 => ones(n))
         end
-
         alpha = yTy / sTy
         alpha = clamp(alpha, 1e-4, 1e4)
-
         return alpha * spdiagm(0 => ones(n))
         
     else
-        error("Estratégia desconhecida para cálculo de B: $strategy")
+        error("Unknown B calculation strategy: $strategy")
     end
 end
 
-end  # fim do módulo MatrixApproximationsModule
 # ==============================================================================
 # JUMP MODEL CREATION
 # ==============================================================================
 
-"""
-Create JuMP model for restoration or optimization phase
-"""
+# Creates the JuMP model structure for either the restoration or optimization phase
 function create_optimized_model(solver_choice::Symbol, phase::Symbol, n::Int, m::Int; env::Union{Gurobi.Env, Nothing}=nothing)
 # Create base model
     model = if solver_choice == :gurobi
         # Usa a constante global em vez de criar um novo env
         Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), "OutputFlag" => 0))
-        
+
     elseif solver_choice == :highs
         Model(optimizer_with_attributes(HiGHS.Optimizer, "output_flag" => false, "threads" => Threads.nthreads(), "primal_feasibility_tolerance" => 1e-8, "dual_feasibility_tolerance" => 1e-8))
     else
         error("Unsupported solver: $solver_choice")
     end
-
     model.obj_dict = Dict{Symbol, Any}()
     model.obj_dict[:phase] = phase
-
     if phase == :restauracao
-        # Algorithm 4.1: Restoration subproblem
+        # Algorithm 4.1: Restoration subproblem structure
         # min e'w + eps * e'|d|  
-        # s.t.  A(z^ℓ)d + E(z^ℓ)w = -h(z^ℓ), |d| ≤ w_aux, z ∈ Ω, w ≥ 0
-
+        # s.t. A(z^ℓ)d + E(z^ℓ)w = -h(z^ℓ), |d| ≤ w_aux, z ∈ Ω, w ≥ 0
         @variable(model, d[1:n])              # Step d = z - z^ℓ
         @variable(model, w[1:m] >= 0)         # Constraint slacks (size m)
         @variable(model, w_aux[1:n] >= 0)     # Auxiliary for |d| (size n)
-
         # Constraints (will be updated later)
         @constraint(model, con[i = 1:m], 0 == 0)
-
         # |d[j]| ≤ w_aux[j]  =>  d[j] ≤ w_aux[j] and -d[j] ≤ w_aux[j]
         @constraint(model, d_upper[j = 1:n], d[j] <= w_aux[j])
         @constraint(model, d_lower[j = 1:n], -d[j] <= w_aux[j])
-
         # Objective: minimize w primarily, then |d|
         eps = 1e-6
         @objective(model, Min, sum(w[i] for i in 1:m) + eps * sum(w_aux[j] for j in 1:n))
-
         # Store references
         model.obj_dict[:d] = d
         model.obj_dict[:w] = w
         model.obj_dict[:w_aux] = w_aux
         model.obj_dict[:con] = con
-
     elseif phase == :otimizacao
-        # Algorithm 4.2: Optimization subproblem
-        # min ∇L(y^k,λ')'(x-y^k)  s.t.  J_h(y^k)(x-y^k) = 0
-
+        # Algorithm 4.2: Optimization subproblem structure
+        # min ∇L(y^k,λ')'(x-y^k)  s.t. J_h(y^k)(x-y^k) = 0
         @variable(model, s[1:n])
-
         # Placeholder constraints
         lp_con = @constraint(model, con[i = 1:m], 0.0 * sum(s[j] for j in 1:n) == 0.0)
-
         # Placeholder objective
         @objective(model, Min, sum(0.0 * s[i] for i in 1:n))
-
         model.obj_dict[:s] = s
         model.obj_dict[:con] = lp_con
     else
         error("Unsupported phase: $phase. Use :restauracao or :otimizacao")
     end
-
     return model
 end
 
@@ -160,28 +130,21 @@ end
 # ALGORITHM 4.1: RESTORATION PHASE
 # ==============================================================================
 
-"""
-Solve restoration subproblem
-min e'w s.t. A(z^ℓ)d + E(z^ℓ)w = -h(z^ℓ), |d_i| ≤ δ, d ∈ [xl-z, xu-z]
-"""
+# Solves the specific restoration subproblem at a given point z
 function solve_restoration_subproblem!(model::JuMP.Model, problem::OptimizationProblem, z::Vector{Float64}, δ::Union{Float64, Vector{Float64}})
     n = length(z)
-
     # Evaluate Jacobian and constraints at z
     A = problem.∇h(z)  # m × n
     h_z = problem.h(z)  # m × 1
     m = length(h_z)
-
     # Retrieve variables from model dictionary
     d = model.obj_dict[:d]
     w = model.obj_dict[:w]
     con = model.obj_dict[:con]
-
     # Update bounds: max(xl-z, -δ) ≤ d ≤ min(xu-z, δ)
     for i in 1:n
-        # Seleciona o delta correto (escalar ou componente i do vetor)
-        d_val = (δ isa Vector) ? δ[i] : δ
 
+        d_val = (δ isa Vector) ? δ[i] : δ
         lb = max(problem.xl[i] - z[i], -d_val)
         ub = min(problem.xu[i] - z[i], d_val)
         set_lower_bound(d[i], lb)
@@ -199,7 +162,6 @@ function solve_restoration_subproblem!(model::JuMP.Model, problem::OptimizationP
             E[i] = 0.0
         end
     end
-
     # Update constraints: A(z^ℓ)d + E(z^ℓ)w = -h(z^ℓ)
     for i in 1:m
         # Zero out existing coefficients
@@ -207,22 +169,17 @@ function solve_restoration_subproblem!(model::JuMP.Model, problem::OptimizationP
             set_normalized_coefficient(con[i], d[j], 0.0)
         end
         set_normalized_coefficient(con[i], w[i], 0.0)
-
         # Set coefficients for d[j]
         for j in 1:n
             set_normalized_coefficient(con[i], d[j], A[i, j])
         end
-
         # Set coefficient for w[i]
         set_normalized_coefficient(con[i], w[i], E[i])
-
         # RHS = -h(z)
         set_normalized_rhs(con[i], -h_z[i])
     end
-
     # Solve
     optimize!(model)
-
     if termination_status(model) == MOI.OPTIMAL
         d_sol = value.(d)
         return d_sol, true
@@ -231,10 +188,7 @@ function solve_restoration_subproblem!(model::JuMP.Model, problem::OptimizationP
     end
 end
 
-"""
-Algorithm 4.1: Restoration Phase
-"""
-
+# Algorithm 4.1: Restoration Phase
 function restoration_phase(
     problem::OptimizationProblem, 
     z::Vector{Float64}, 
@@ -247,54 +201,43 @@ function restoration_phase(
     iterglobal::Int
 )
     # =========================================================
-    # PASSO 1: Computar ctarget e ϵ_c baseados no x^k original
+    # Step 1: Target parameters calculation based on original point
     # =========================================================
     h_init = problem.h(z)
     norm_h_init = norm(h_init)
     
-    # c(x^k) = 1/2 * ||h(x^k)||^2
     c_init = 0.5 * norm_h_init^2 
-    
-    # ctarget = 1/2 * r^2 * ||h(x^k)||^2
+
     r = params.r_resto 
     c_target = 0.5 * (r^2) * (norm_h_init^2) 
-    
-    # ϵ_c = rfeas * ||h(x^k)||
+
     eps_c = params.rfeas * norm_h_init 
     
     # =========================================================
-    # PASSO 2: Inicializar ℓ <- 0 e z^0 
+    # Step 2: Initialization
     # =========================================================
     ℓ = 0
-    c_prev = c_init # Usado para a heurística de trust region
-    # Estamos tomando z^0=x^k, então as condições a seguir são satisfeitas sem precisar de testes:
-    # 1. ||h(z^0)|| <= ||h(x^k)||
-    # 2. ||z^0-x^k|| <= βc * ||h(x^k)||
+    c_prev = c_init
+    
     verbose && println("🔄 Starting restoration phase...")
     params.debugverbose && println("DEBUG: Initial state - δ=$δ, norm_h_init=$norm_h_init, c_target=$c_target, eps_c=$eps_c")
-
     # Use temporary buffer to avoid modifying z directly
     buffers.z_temp .= z
     buffers.z_old .= z
-
-    # LOOP EXTERNO (Iterações ℓ)
+    # Outer Loop (Iterations ℓ)
     while ℓ < params.max_iter_resto
         
-        # Avalia c(z^ℓ)
         h_z = problem.h(buffers.z_temp)
         c_z = 0.5 * norm(h_z)^2
-
-        # Computa o gradiente projetado para a condição de parada: || P_Ω(z - ∇c(z)) - z ||
+        # || P_Ω(z - ∇c(z)) - z ||
         A_z = problem.∇h(buffers.z_temp)
         grad_c = A_z' * h_z
         z_minus_grad = buffers.z_temp .- grad_c
         projected_step = clamp.(z_minus_grad, problem.xl, problem.xu)
         proj_grad_norm = norm(projected_step .- buffers.z_temp)
-
         params.debugverbose && println("DEBUG: Iter $ℓ - c(z)=$c_z, proj_grad_norm=$proj_grad_norm")
-
         # =========================================================
-        # PASSO 3: Critério de parada
+        # Step 3: Stopping criteria check
         # =========================================================
         if c_z <= c_target || proj_grad_norm <= eps_c
             verbose && println("✅ Restoration stopped in $ℓ iterations.")
@@ -307,95 +250,82 @@ function restoration_phase(
             z .= buffers.z_temp
             return buffers.z_temp, δ, true
         end
-
         # =========================================================
-        # PASSO 4: Inicializar j <- 0 e escolher δ
+        # Step 4: Inner loop initialization j <- 0 and choose δ
         # =========================================================
         j = 0
         success_step = false
-
-        # LOOP INTERNO (Iterações j - Busca pelo passo aceito)
+        # Inner Loop (Iterations j - Trust region search)
         while j < params.max_iter_resto
             
             # =========================================================
-            # PASSO 5: Resolver o subproblema para computar z^{ℓ,j}
+            # Step 5: Subproblem resolution to compute z^{ℓ,j}
             # =========================================================
             buffers.s_val, success_solver = solve_restoration_subproblem!(model, problem, buffers.z_temp, δ)
-
             if success_solver
                 buffers.z_old .= buffers.z_temp
                 
                 # Test new point z^{ℓ,j}
                 buffers.z_temp .= buffers.z_temp .+ buffers.s_val
                 buffers.z_temp .= clamp.(buffers.z_temp, problem.xl, problem.xu)
-
                 # Evaluate new c(z)
                 h_new = problem.h(buffers.z_temp)
                 c_new = 0.5 * norm(h_new)^2
-
                 # =========================================================
-                # PASSO 6: Condição de Descida sobre c(z)
+                # Step 6: Descent condition on c(z)
                 # c(z^{ℓ,j}) ≤ c(z^ℓ) - α_R * ||z^{ℓ,j} - z^ℓ||^2
                 # =========================================================
                 step_norm_sq = dot(buffers.z_temp .- buffers.z_old, buffers.z_temp .- buffers.z_old)
                 reduction_threshold = params.αR * step_norm_sq
-
                 is_accepted = c_new <= c_z - reduction_threshold
-
-                # Gravação de Log
+                # Logging
                 log_entry = StepLog_TwoPhase(
                     iterglobal, copy(buffers.z_old), copy(buffers.z_temp), 
                     is_accepted ? :accepted : :rejected, :restoration, δ, 0.0, 0.0
                 )
                 push!(full_log, log_entry)
-
                 if is_accepted
                     success_step = true
-                    c_prev = c_z # Atualiza o estado anterior para a próxima iteração
-                    break        # Passo aceito: sai do laço interno j
+                    c_prev = c_z
+                    break 
                 else
-                    # REJEIÇÃO: Restaura z e encolhe δ estritamente (Teoria Passo 6)
+                    # Rejection: State restoration and strict trust region reduction
                     buffers.z_temp .= buffers.z_old
                     δ = max.(params.τ1 .* δ, params.δmin)
                 end
             else
-                # Se o solver falhar (ex: instabilidade numérica), trata como rejeição
+                # Solver failure handling via rejection
                 buffers.z_temp .= buffers.z_old
                 δ = max.(params.τ1 .* δ, params.δmin)
             end
-
             j += 1
-        end # Fim do loop j
-
-        # Checa se o loop j estourou o limite sem encontrar passo aceitável
+        end 
+        # Inner loop limit check
         if !success_step || j >= params.max_iter_resto
             verbose && println("⚠️ Restoration failure at iteration $ℓ (Too many inner iterations)")
             z .= buffers.z_temp
             return z, δ, false
         end
-
         # =========================================================
-        # PASSO 7: Atualização Adaptativa do δ 
+        # Step 7: Adaptive trust region update
         # (Feito APÓS a aceitação do passo para preparar o próximo ℓ)
         # =========================================================
         if params.use_ratio_update && ℓ > 0 && c_prev > params.ratio_safeguard_tol && @isdefined(c_new)
             ratio = clamp(c_new / c_prev, params.ratio_min_factor, params.ratio_max_factor)
             δ = clamp.(ratio .* δ, params.δmin, params.δmax)
         end
-
         # =========================================================
-        # PASSO 7 (Teoria): z^{ℓ+1} = z^{ℓ,j}, ℓ <- ℓ+1, voltar ao Passo 3
+        # Step 7 (Theory): z^{ℓ+1} = z^{ℓ,j}, ℓ <- ℓ+1, return to Step 3
         # =========================================================
-        # O z^{ℓ+1} já está em buffers.z_temp devido ao sucesso no loop interno
+        # z^{ℓ+1} is already in buffers.z_temp due to success in the inner loop
         ℓ += 1
-        
-    end # Fim do loop ℓ
+    end 
 
-    # Se atingiu o limite máximo de iterações externas ℓ
     z .= buffers.z_temp
     return z, δ, ℓ < params.max_iter_resto
 end
 
+# Calculates trust region radius using quadratic interpolation models
 function quadratic_backtracking_step!(
     δ_current::Union{Float64, Vector{Float64}},
     f_current::Float64,
@@ -405,98 +335,83 @@ function quadratic_backtracking_step!(
     s_norm::Float64,
     step_norm_sq::Float64,
     action::Symbol=:decrease;
-    # Argumentos Opcionais
+
     anisotropic::Bool=false,
     s_vec::Vector{Float64}=Float64[],
     grad::Vector{Float64}=Float64[],
     grad_old::Vector{Float64}=Float64[],
-    mode::Symbol=:shrink, # :shrink ou :reshape
-    # Configurações renomeadas
+    mode::Symbol=:shrink, 
+
     min_reduction_ratio::Float64=0.1,
     max_reduction_ratio::Float64=0.5,
     min_increase_ratio::Float64=1.0,
     max_increase_ratio::Float64=2.0,
 )
-
-    # --- 1. FALLBACK ISOTRÓPICO (Scalar ou Vetor Uniforme) ---
+    # Isotropic behavior execution block
     if !anisotropic || !(δ_current isa Vector)
         δ_scalar = (δ_current isa Vector) ? maximum(δ_current) : δ_current
-
         b_global = slope
         a_global = f_new - f_current - slope
-
         safe_size = 1.0
-
         if action == :increase
             local_max = (step_norm_sq < δ_scalar^2) ? 2.0 : max_increase_ratio
-
             if a_global <= params.ratio_safeguard_tol
                 safe_size = local_max
             else
                 theo = -b_global / (2.0 * a_global)
                 safe_size = clamp(theo, min_increase_ratio, local_max)
             end
-        else # :decrease
-            if a_global < params.ratio_safeguard_tol
-                fallback = max(δ_scalar * params.τ1, s_norm * params.τ2)
-                d_val = clamp(fallback, params.δmin, params.δmax)
-                return fill(d_val, length(δ_current))
-            end
-
+            else # :decrease
+                if a_global < params.ratio_safeguard_tol
+                    fallback = max(δ_scalar * params.τ1, s_norm * params.τ2)
+                    d_val = clamp(fallback, params.δmin, params.δmax)
+                    return (δ_current isa Vector) ? fill(d_val, length(δ_current)) : d_val
+                end
             theo = -b_global / (2.0 * a_global)
             safe_size = clamp(theo, min_reduction_ratio, max_reduction_ratio)
         end
-
         δ_val = clamp(safe_size * δ_scalar, params.δmin, params.δmax)
         return (δ_current isa Vector) ? fill(δ_val, length(δ_current)) : δ_val
-        # return fill(δ_val, length(δ_current))
-    end
 
-    # --- 2. CÁLCULO ANISOTRÓPICO ---
+    end
+    # Anisotropic calculation setup
     n = length(δ_current)
     δ_new = copy(δ_current)
     multipliers = zeros(n)
-
-    # === FASE A: CÁLCULO FÍSICO (Multiplicadores Teóricos) ===
+    # Phase A: Computation of directional multipliers
     for i in 1:n
         b_i = grad[i] * s_vec[i]
         a_i = f_new - f_current - b_i
-
         if a_i < params.ratio_safeguard_tol
             multipliers[i] = (action == :increase) ? max_increase_ratio : 1.0
         else
             multipliers[i] = -b_i / (2.0 * a_i)
         end
     end
-
-    # === FASE B: ESTRATÉGIA (Aplicação de Regras) ===
+    # Phase B: Strategy application
     has_history = !isempty(grad_old) && length(grad_old) == n
-
     if action == :decrease
         if mode == :reshape
-            # ESTRATÉGIA 1: Mudar a escala (Reshape)
+            # Strategy 1: Alter aspect ratio (Reshape)
             val_max, idx_max = findmax(multipliers)
 
-            # Aplica Clamp Seletivo
             for i in 1:n
                 if i == idx_max
-                    multipliers[i] = 1.0 # VENCEDOR: Mantém tamanho (Ancoragem)
+                    multipliers[i] = 1.0 
                 else
-                    # PERDEDORES: Redução forçada
+
                     multipliers[i] = clamp(multipliers[i], min_reduction_ratio, max_reduction_ratio)
                 end
             end
-
             if params.verbose_out
-                @printf("   [Reshape] Escala alterada: Dim %d mantida. Outras reduzidas.\n", idx_max)
+                @printf("   [Reshape] Scale altered: Dim %d maintained. Others reduced.\n", idx_max)
             end
-
         elseif mode == :shrink
-            # ESTRATÉGIA 2: Reduzir região sem alterar escala (Uniform Shrink)
+            # Strategy 2: Uniform shrink maintaining proportions
             b_global = slope
             a_global = f_new - f_current - slope
             
-            # Taxa de redução baseada no passo direcional global
+
             if a_global < params.ratio_safeguard_tol
                 uniform_ratio = max_reduction_ratio
             else
@@ -504,61 +419,51 @@ function quadratic_backtracking_step!(
                 uniform_ratio = clamp(theo, min_reduction_ratio, max_reduction_ratio)
             end
             
-            # Aplica o MESMO multiplicador para todas as dimensões
-            fill!(multipliers, uniform_ratio)
 
+            fill!(multipliers, uniform_ratio)
             if params.verbose_out
-                @printf("   [Uniform Shrink] Escala mantida: Multiplicador global de %.2f\n", uniform_ratio)
+                @printf("   [Uniform Shrink] Scale maintained: Global multiplier at %.2f\n", uniform_ratio)
             end
         end
-    else # action == :increase
+    else 
         for i in 1:n
             multipliers[i] = clamp(multipliers[i], min_increase_ratio, max_increase_ratio)
         end
     end
-
-    # === FASE C: ATUALIZAÇÃO ===
+    # Phase C: State update application
     δ_new .= clamp.(δ_current .* multipliers, params.δmin, params.δmax)
-
     if params.verbose_out
         vec_str = string("[", join([@sprintf("%.2f", x) for x in multipliers], ", "), "]")
-        @printf("   [Aniso %s] Multiplicadores: %s\n", string(action), vec_str)
+        @printf("   [Aniso %s] Multipliers: %s\n", string(action), vec_str)
     end
-
     return δ_new
 end
 
-"""
-Solve optimization subproblem
-min ∇f'·s  s.t. ∇h'·s = -h, bounds
-"""
-"""
-Solve optimization subproblem
-min ∇f'·s  s.t. ∇h'·s = 0, bounds
-"""
-function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::Union{Float64, Vector{Float64}}, problem::OptimizationProblem, buffers::OptimizedBuffers)
+# Solves the tangent step optimization subproblem
+# min ∇f'·s  s.t. ∇h'·s = -h, bounds
+function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::Union{Float64, Vector{Float64}}, problem::OptimizationProblem, buffers::OptimizedBuffers, params::TwoPhaseParams, B::Union{AbstractMatrix, Nothing})
     m = length(buffers.h_old)
     grad_L = buffers.∇f + transpose(buffers.∇h) * buffers.λ
-
-    # 1. Define quadratic matrix (Exact Hessian or Approximation B)
+    
+    # Define quadratic matrix
     local Hqp
     if params.use_quadratic
-        # Apply regularization
         Hqp = B + spdiagm(0 => params.σ * ones(n)) 
     end
 
-    # 2. Solve via RipQP (QuadraticModels)
+    # Helper: get trust region radius for dimension i
+    get_δ(i) = (δ isa Vector) ? δ[i] : δ
+
+    # Routing to RipQP
     if params.use_quadratic && params.quadratic_solver == :ripqp
-        # Calculate bounds: max(xl-x, -δ) ≤ s ≤ min(xu-x, δ)
         for i in 1:n
-            d_val = (δ isa Vector) ? δ[i] : δ
+            d_val = get_δ(i)
             lx = problem.xl[i] - buffers.x_temp[i]
             ux = problem.xu[i] - buffers.x_temp[i]
             buffers.lvar[i] = max(lx, -d_val)
             buffers.uvar[i] = min(ux, d_val)
         end
 
-        # Tangent step: constraints are ∇h'·s = 0
         qm = QuadraticModel(buffers.∇f, Hqp; 
                             A=buffers.∇h, 
                             lcon=zeros(m), 
@@ -577,30 +482,24 @@ function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::Union{Flo
         end
     end
 
-    # 3. Solve via JuMP (Gurobi for QP or any solver for LP)
+    # JuMP Internal Solver routing
     s = model[:s]
     con = model[:con]
 
-    # Update variable bounds
     @inbounds for i in 1:n
-        d_val = (δ isa Vector) ? δ[i] : δ
+        d_val = get_δ(i) # Uses the helper to handle Scalar vs Vector
         lx = problem.xl[i] - buffers.x_temp[i]
         ux = problem.xu[i] - buffers.x_temp[i]
-
         set_lower_bound(s[i], max(lx, -d_val))
         set_upper_bound(s[i], min(ux, d_val))
     end
 
-    # Update objective function
     if params.use_quadratic
-        # SQP mode via JuMP
         @objective(model, Min, 0.5 * dot(s, Hqp * s) + dot(buffers.∇f, s))
     else
-        # SLP mode
         @objective(model, Min, dot(grad_L, s))
     end
 
-    # Update constraints: Tangent step ∇h'·s = 0
     @inbounds for i in 1:m
         set_normalized_rhs(con[i], 0.0)
         for j in 1:n
@@ -611,82 +510,71 @@ function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::Union{Flo
     optimize!(model)
 
     if termination_status(model) == MOI.OPTIMAL
-        # Extract primal solution
         @inbounds for i in 1:n
             buffers.s_val[i] = value(s[i])
         end
-
-        # Extract dual variables
         for i in 1:m
             buffers.λ[i] = dual(con[i])
         end
-
         return true, objective_value(model)
     end
 
     return false, 0.0
 end
 
-
-"""
-Algorithm 4.2: Optimization Phase (Non-Monotone Support)
-"""
+# Executes the complete Optimization Phase (Algorithm 4.2)
 function optimization_phase(
     problem::OptimizationProblem,
-    x_k::Vector{Float64},      # Passo 0: O x antes da restauração (x^k)
-    λ_k::Vector{Float64},      # Passo 0: O lambda anterior (λ^k)
-    norm_h_xk::Float64,        # Passo 0: ||h(x^k)||
-    y::Vector{Float64},        # Passo 0: Ponto após restauração (y^k)
+    x_k::Vector{Float64},      
+    λ_k::Vector{Float64},      
+    norm_h_xk::Float64,        
+    y::Vector{Float64},        
     δ::Union{Float64, Vector{Float64}},
     model_opt::JuMP.Model,
     params;
-    θ_k::Float64=0.5,          # Passo 0: Parâmetro de penalidade da iteração k
+    B::Union{AbstractMatrix, Nothing}=nothing,
+    θ_k::Float64=0.5,          
     verbose::Bool=params.verbose_in,
     buffers::OptimizedBuffers,
     full_log::Vector{StepLog_TwoPhase}=Vector{StepLog_TwoPhase}(),
     iterglobal::Int,
-    # === Histórico para Busca Não-Monótona ===
     lagrangian_history::Vector{Float64}=Float64[],
     merit_history::Vector{Float64}=Float64[]
 )
+
     # =========================================================
-    # PASSO 1: Inicializar j <- 0, escolher δ_j e λ'
+    # Step 1: Initialize j <- 0, choose δ_j and λ'
     # =========================================================
     j = 0
     n = length(y)
     m = length(problem.h(y))
     θ = θ_k
     consecutive_rejects = 0
-
     verbose && println("🎯 Starting optimization phase...")
 
-    # Avaliações no ponto y^k 
     buffers.x_temp .= y
     F_y = problem.f(y)
     h_y = problem.h(y)
     norm_h_y = norm(h_y)
     
-    # Avaliações no ponto x^k
+
     F_xk = problem.f(x_k)
     h_xk = problem.h(x_k)
-
     params.debugverbose && println("🔍 [DEBUG-OPT] Initial state: F(y^k)=$F_y, ||h(y^k)||=$norm_h_y, δ=$δ")
     params.debugverbose && println("🔍 [DEBUG-OPT] History sizes - Lagrangian: $(length(lagrangian_history)), Merit: $(length(merit_history))")
-
-    # Loop Principal de Otimização (Iterações j)
+    # Main optimization iteration loop
     while j < params.max_iter_opt
         params.debugverbose && println("\n🔍 [DEBUG-OPT] === Iteration j=$j started ===")
 
-        # Preparar gradientes em y^k para o subproblema
         buffers.∇f = problem.∇f(buffers.x_temp)
         buffers.∇h = problem.∇h(buffers.x_temp)
-
         # =========================================================
-        # PASSO 2: Encontrar z^{ℓ,j} resolvendo o subproblema
-        # PASSO 3: Escolher λ 
+        # Step 2: Find z^{ℓ,j} by solving the subproblem
+        # Step 3: Choose λ 
         # =========================================================
-        success, f_model = solve_optimization_subproblem!(model_opt, n, δ, problem, buffers)
+        success, f_model = solve_optimization_subproblem!(model_opt, n, δ, problem, buffers, params, B) # 
         !params.use_quadratic && (buffers.λ .= 0.0)
+        
         if !success
             δ = max.(params.τ2 .* δ, params.δmin)
             j += 1
@@ -694,58 +582,48 @@ function optimization_phase(
             verbose && println("🔄 Subproblem failure, reducing δ to $δ (j=$j)")
             continue
         end
-
         # z^j = y^k + s
         buffers.x_old .= buffers.x_temp
         buffers.x_temp .+= buffers.s_val
-
         # Avaliar funções no novo ponto z^j
         F_zj = problem.f(buffers.x_temp)
         h_zj = problem.h(buffers.x_temp)
         norm_h_zj = norm(h_zj)
-
         step_norm_sq = dot(buffers.s_val, buffers.s_val)
         
         params.debugverbose && println("🔍 [DEBUG-OPT] Subproblem solved. ||s|| = $(sqrt(step_norm_sq)), f_model predicted red: $f_model")
         params.debugverbose && println("🔍 [DEBUG-OPT] New point evals: F(z^j)=$F_zj, ||h(z^j)||=$norm_h_zj, λ=$(buffers.λ)")
-
         # =========================================================
-        # PASSO 4: Teste de Descida da Lagrangiana
+        # Step 4: Lagrangian descent evaluation
         # L(z^j, λ) ≤ L(y^k, λ) - α_L ||z^j - y^k||^2
         # =========================================================
         L_y_lambda = F_y + dot(buffers.λ, h_y) 
         L_zj_lambda = F_zj + dot(buffers.λ, h_zj)
-
-        # Heurística Não-Monótona para a Lagrangiana
+        # Non-Monotonic Lagrangian Heuristic
         ref_lagrangian = isempty(lagrangian_history) ? L_y_lambda : max(L_y_lambda, maximum(lagrangian_history))
         lagrangian_threshold = ref_lagrangian - params.αL * step_norm_sq
-
         params.debugverbose && println("🔍 [DEBUG-OPT] --- Lagrangian Check ---")
         params.debugverbose && println("🔍 [DEBUG-OPT] L(y^k, λ): $L_y_lambda")
         params.debugverbose && println("🔍 [DEBUG-OPT] L(z^j, λ): $L_zj_lambda")
         params.debugverbose && println("🔍 [DEBUG-OPT] Ref Lagrangian: $ref_lagrangian")
         params.debugverbose && println("🔍 [DEBUG-OPT] Threshold to beat: $lagrangian_threshold (Drop req: $(params.αL * step_norm_sq))")
-
         if L_zj_lambda > lagrangian_threshold
-            # -- FALHA NO PASSO 4 --
+            # -- step 4 fail --
             gap = L_zj_lambda - lagrangian_threshold
             params.debugverbose && println("🚫 [DEBUG-OPT] REJECTED by Lagrangian! L(z^j) is $gap ABOVE the threshold.")
 
-            # LOG DA REJEIÇÃO PELA LAGRANGIANA RECUPERADO AQUI
             push!(full_log, StepLog_TwoPhase(
                 iterglobal, copy(buffers.x_old), copy(buffers.x_temp), 
                 :rejected, :optimization, δ, L_zj_lambda, compute_merit_functions(buffers.λ, θ_k, h_zj, F_zj)
             ))
-
             consecutive_rejects += 1
-            buffers.x_temp .= buffers.x_old # Reverte o passo
+            buffers.x_temp .= buffers.x_old # Take back de old step
             
             if params.use_slp_stopping && ((δ isa Vector) ? maximum(δ) : δ) <= params.δmin
                 verbose && println("⚠️ δ too small, aborting optimization")
                 return y, buffers.λ, θ_k, δ, false
             end
-
-            # Lógica de encolhimento de δ após falha na Lagrangiana
+            # Trust region reduction post-rejection
             if !params.backtracking_quadratic
                 s_ref = (δ isa Vector) ? abs.(buffers.s_val) : norm(buffers.s_val, Inf)
                 δ_old = copy(δ)
@@ -754,8 +632,12 @@ function optimization_phase(
             else
                 verbose && println("🔄 Lagrangian test failure, applying backtracking")
                 s_inf = norm(buffers.s_val, Inf)
+
+                if params.anisotropic_trust_region
                 backtracking_mode = isodd(consecutive_rejects) ? :reshape : :shrink
-                
+                else
+                backtracking_mode = :shrink
+                end
                 params.debugverbose && println("🔍 [DEBUG-OPT] Quad Backtracking (mode: $backtracking_mode). Consecutive rejects: $consecutive_rejects")
                 δ = quadratic_backtracking_step!(
                     δ, L_y_lambda, L_zj_lambda, f_model, params, 
@@ -769,34 +651,29 @@ function optimization_phase(
                 )
                 if params.anisotropic_trust_region && consecutive_rejects >= 2
                     was_corrected = enforce_aspect_ratio!(δ, 0.15)
-                    was_corrected && params.verbose_out && verbose && println("🎈 [Rescue] Re-inflando dimensões.")
+                    was_corrected && params.verbose_out && verbose && println("🎈 [Rescue] Re-inflating dimensions.")
                 end
             end
             
-            # Vai para o Passo 2 (Iteração j+1)
+            # Go to Step 2 (Iter j+1)
             j += 1
             continue
         end
-
         params.debugverbose && println("✅ [DEBUG-OPT] ACCEPTED by Lagrangian check. (Beat threshold by $(lagrangian_threshold - L_zj_lambda))")
-        # Se passou na Lagrangiana, zera o contador de rejeições para o Backtracking
-        consecutive_rejects = 0 
 
+        consecutive_rejects = 0 
         # =========================================================
-        # PASSO 5: Atualização do parâmetro de penalidade θ
+        # Step 5: Penalty parameter θ updates
         # =========================================================
         L_x_lambda_k = F_xk + dot(λ_k, h_xk)
         
         Phi_y_thetak = compute_merit_functions(buffers.λ, θ_k, h_y, F_y)
         Phi_xk_thetak = compute_merit_functions(λ_k, θ_k, h_xk, F_xk)
-
-        # Heurística Não-Monótona para o Teste do Theta
+        # # Non-Monotonic Heuristic for Theta's test
         ref_merit_thetak = isempty(merit_history) ? Phi_xk_thetak : max(Phi_xk_thetak, maximum(merit_history))
-
         params.debugverbose && println("🔍 [DEBUG-OPT] --- Theta Update ---")
         params.debugverbose && println("🔍 [DEBUG-OPT] Φ(y^k, θ_k): $Phi_y_thetak")
         params.debugverbose && println("🔍 [DEBUG-OPT] Ref Φ(x^k, θ_k): $ref_merit_thetak, Drop req: $(params.αΦ * norm_h_xk)")
-
         if Phi_y_thetak <= ref_merit_thetak - params.αΦ * norm_h_xk
             θ = θ_k
             params.debugverbose && println("🔍 [DEBUG-OPT] Condition met. Keeping θ = $θ")
@@ -811,46 +688,39 @@ function optimization_phase(
                 θ = numerador / denominador
             else
                 params.debugverbose && println("⚠️ [DEBUG-OPT] Denominator too small, falling back to θ_k.")
-                θ = θ_k # Fallback numérico
+                θ = θ_k
             end
         end
-        # params.debugverbose && println("   [Theta Update] θ updated to $θ (j=$j)")
 
         # =========================================================
-        # PASSO 6: Teste da Função de Mérito
+        # Step 6: Merit function checks
         # Φ(z^j, λ, θ) ≤ Φ(x^k, λ^k, θ) - α_Φ ||h(x^k)||
         # =========================================================
         Phi_zj_theta = compute_merit_functions(buffers.λ, θ, h_zj, F_zj)
         Phi_xk_theta = compute_merit_functions(λ_k, θ, h_xk, F_xk)
-
-        # Heurística Não-Monótona para a Mérito Final
+        # Non-Monotonic Heuristic for Final Merit
         ref_merit_theta = isempty(merit_history) ? Phi_xk_theta : max(Phi_xk_theta, maximum(merit_history))
         merit_threshold = ref_merit_theta - params.αΦ * norm_h_xk
-
         params.debugverbose && println("🔍 [DEBUG-OPT] --- Merit Function Check ---")
         params.debugverbose && println("🔍 [DEBUG-OPT] Φ(z^j, θ): $Phi_zj_theta")
         params.debugverbose && println("🔍 [DEBUG-OPT] Ref Φ(x^k, θ): $ref_merit_theta")
         params.debugverbose && println("🔍 [DEBUG-OPT] Threshold to beat: $merit_threshold")
 
-        # Gravação de Log da tentativa para o Teste de Mérito
         push!(full_log, StepLog_TwoPhase(
             iterglobal, copy(buffers.x_old), copy(buffers.x_temp), 
             Phi_zj_theta > merit_threshold ? :rejected : :accepted, 
             :optimization, δ, L_zj_lambda, Phi_zj_theta
         ))
-
         if Phi_zj_theta > merit_threshold
-            # -- FALHA NO PASSO 6 --
+            # -- Step 6 FAILS --
             gap_merit = Phi_zj_theta - merit_threshold
             params.debugverbose && println("🚫 [DEBUG-OPT] REJECTED by Merit Function! Φ(z^j) is $gap_merit ABOVE threshold.")
             
-            buffers.x_temp .= buffers.x_old # Reverte o passo
-
+            buffers.x_temp .= buffers.x_old 
             if params.use_slp_stopping && ((δ isa Vector) ? maximum(δ) : δ) <= params.δmin + 1e-9
                 verbose && println("⚠️ δ too small, aborting optimization")
                 return y, buffers.λ, θ, δ, false
             end
-
             δ_old = copy(δ)
             δ = clamp.(δ .* params.τ2, params.δmin, params.δmax)
             j += 1
@@ -859,28 +729,30 @@ function optimization_phase(
             verbose && println("🔄 Merit test failure, reducing δ to $δ (j=$j)")
             continue
         end
-
         # =========================================================
-        # PASSO 7: Passo Aceito! Atualiza estado final e δ para o próx passo
+        # Step 7: Step Accepted! Update final state and δ for the next step
         # =========================================================
         params.debugverbose && println("✅ [DEBUG-OPT] ACCEPTED by Merit function! (Beat threshold by $(merit_threshold - Phi_zj_theta))")
         verbose && println("✅ Step accepted in optimization (j=$j)")
         
-        # O passo foi aceito, calculamos o gradiente para o log ou backtracking futuro
+
         ∇f_new_accepted = problem.∇f(buffers.x_temp)
         buffers.∇f_old .= ∇f_new_accepted
         
-        # Atualização (Aumento) da região de confiança
+        # Trust region expansion
         if !params.backtracking_quadratic
-            # Calcula as reduções
-            ared = L_y_lambda - L_zj_lambda
-            pred = L_y_lambda - f_model
-            
-            # Limiar de aceitação estrita para expansão (0.5 padrão para SLP)
-            rho_slp = 0.5
-            
-            # Condição segura usando multiplicação: ared >= rho * pred
-            if ared >= rho_slp * pred
+            if params.aredpred_ratio
+                ared = L_y_lambda - L_zj_lambda
+                pred = L_y_lambda - f_model
+                
+                rho_slp = 0.5
+                
+                if ared >= rho_slp * pred
+                    δ_old = copy(δ)
+                    δ = min.(δ ./ params.τ3, params.δmax)
+                    params.debugverbose && println("🔍 [DEBUG-OPT] Trust Region expanded from $δ_old to $δ")
+                end
+            else
                 δ_old = copy(δ)
                 δ = min.(δ ./ params.τ3, params.δmax)
                 params.debugverbose && println("🔍 [DEBUG-OPT] Trust Region expanded from $δ_old to $δ")
@@ -896,22 +768,16 @@ function optimization_phase(
                 grad_old=buffers.∇f_old, mode=:shrink
             )
         end
-
-        break # Sai do loop j
+        break 
     end
 
-    # Retorna z^j (atualmente em x_temp) como x^{k+1}
     y .= buffers.x_temp
     success = j < params.max_iter_opt
-
     params.debugverbose && println("🏁 [DEBUG-OPT] Optimization phase finished. Success: $success. Total inner iters: $j")
-
     return y, buffers.λ, θ, δ, success
 end
 
-"""
-Main two-phase optimization algorithm (Algorithm 4.3)
-"""
+# Main wrapper algorithm orchestrating restoration and optimization (Algorithm 4.3)
 function two_phase_optimization(
     problem::OptimizationProblem,
     x0::Vector{Float64},
@@ -922,12 +788,10 @@ function two_phase_optimization(
 )
     solver_choice=params.general_solver
     verbose=params.verbose_out
-    # println(params)
-    logio = nothing
 
+    logio = nothing
     try
         verbose && println("🚀 Starting two-phase optimization")
-
         if params.debugverbose
             println("DEBUG: === INITIALIZATION ===")
             println("DEBUG: Basic parameters:")
@@ -936,11 +800,9 @@ function two_phase_optimization(
             println("  r_resto = $(params.r_resto)")
             println("  rfeas = $(params.rfeas)")
         end
-
         n = length(x0)
         m = length(problem.h(x0))
 
-        # Initialize variables
         x = clamp.(copy(x0), problem.xl, problem.xu)
         λ = zeros(m)
         θ = params.θ0
@@ -949,38 +811,32 @@ function two_phase_optimization(
         iter = 0
         B   = params.use_quadratic ? spdiagm(0 => ones(n)) : nothing
 
-        # Contadores de convergência
         countG = 0
         countF = 0
         countS = 0
-
         # Create buffers
         buffers = OptimizedBuffers(n, m)
-
         # History tracking
         x_hist = history ? Vector{Vector{Float64}}(undef, max_outer_iter + 1) : nothing
         if history
             x_hist[1] = copy(x)
         end
         full_log = Vector{StepLog_TwoPhase}()
-
-        # === Inicialização dos Buffers Não-Monótonos ===
+        # === Initialization of Non-Monotonic Buffers ===
         history_size = params.non_monotone_M
         lagrangian_history = Float64[]
         merit_history = Float64[]
 
-        # Evaluate initial state
         f_current = problem.f(x)
         h_current = problem.h(x)
         norm_h_current = norm(h_current)
         buffers.∇f_old = problem.∇f(x)
         
-        # Popula o estado inicial no histórico não-monótono
+        # Initial state population in non-monotonic history
         push!(lagrangian_history, f_current + dot(λ, h_current))
         push!(merit_history, compute_merit_functions(λ, θ, h_current, f_current))
-
         # ====================================================================
-        # Verificação de Otimalidade da Solução Inicial (KKT / AGP)
+        # Initial solution optimality check
         # ====================================================================
         jac_h = problem.∇h(x)
         Lgrad = buffers.∇f_old + jac_h' * λ
@@ -990,7 +846,6 @@ function two_phase_optimization(
         if params.gpnorm_div_nelem
             gpnorm /= n
         end
-
         if params.debugverbose
             println("DEBUG: Initial state:")
             println("  x0 = $x0")
@@ -998,27 +853,23 @@ function two_phase_optimization(
             println("  ||h(x0)|| = $norm_h_current")
             println("  gpnorm = $gpnorm")
         end
-
         if (gpnorm < params.tolG) && (norm_h_current < tolerance)
-            log_message!("✅ SOLUÇÃO INICIAL JÁ É ÓTIMA!", logio; verbose=verbose)
-            log_message!("   Condições KKT satisfeitas.", logio; verbose=verbose)
+            log_message!("✅ INITIAL SOLUTION IS OPTIMAL!", logio; verbose=verbose)
+            log_message!("   KKT conditions are satisfied.", logio; verbose=verbose)
             if params.use_slp_stopping
                 countG = params.maxcount
                 countF = params.maxcount
             end
         end
-
         # Create models
-        # const_env = Gurobi.Env()
-        # const const_env = Gurobi.Env(OutputFlag=0)
+
+
         model_restaura = create_optimized_model(solver_choice, :restauracao, n, m; env=GRB_ENV)
         model_opt = create_optimized_model(solver_choice, :otimizacao, n, m; env=GRB_ENV)
-
-# Table header
+        # Table header
         log_message!(repeat("=", 120), logio; verbose=verbose)
         log_message!("                    TWO-PHASE OPTIMIZATION - ALGORITHM 4.3", logio; verbose=verbose)
         log_message!(repeat("=", 120), logio; verbose=verbose)
-
         if params.use_slp_stopping
             msg = @sprintf("%-4s %-12s %-10s %-8s %-8s %-9s %-10s %-10s %-18s", "k", "f(xᵏ)", "||h(xᵏ)||", "δr", "δo", "||λ||", "||Δx||", "||gpnorm||", "(G|F|S)")
         else
@@ -1026,58 +877,51 @@ function two_phase_optimization(
         end
         log_message!(msg, logio; verbose=verbose)
         log_message!(repeat("-", 120), logio; verbose=verbose)
-
         d_r_print = (δr isa Vector) ? maximum(δr) : δr
         d_o_print = (δo isa Vector) ? maximum(δo) : δo
         lambda_print_init = norm(λ)
-
         if params.use_slp_stopping
             msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10s %-10.3e %-18s", 0, f_current, norm_h_current, d_r_print, d_o_print, lambda_print_init, "-", gpnorm, "0|0|0")
         else
             msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10s", 0, f_current, norm_h_current, d_r_print, d_o_print, lambda_print_init, gpnorm, "-")
         end
         log_message!(msg, logio; verbose=verbose)
-
         # Main loop (Algorithm 4.3)
         while iter < max_outer_iter
             
-            # --- Check Stopping Criteria ---
+            # --- Convergence checking ---
             if params.use_slp_stopping
                 is_feasible = norm_h_current < tolerance
                 
                 slp_converged_kkt = (countG >= params.maxcount && countF >= params.maxcount && is_feasible)
-                
-                slp_converged_step = (countS >= params.maxcount && is_feasible) 
 
+                slp_converged_step = (countS >= params.maxcount && is_feasible) 
                 if slp_converged_kkt || slp_converged_step
                     log_message!("-" ^ 120, logio; verbose=verbose)
                     if slp_converged_kkt
-                        log_message!("✅ CONVERGÊNCIA: Condições KKT (gradiente, redução E restrição pequenos)", logio; verbose=verbose)
+                        log_message!("✅ CONVERGENCE - KKT CONDITIONS: Small gradient, reduction, and constraint violation", logio; verbose=verbose)
                     else
-                        log_message!("✅ CONVERGÊNCIA: Passo suficientemente pequeno em ponto viável", logio; verbose=verbose)
+                        log_message!("✅ CONVERGENCE - SMALL STEP: Sufficiently small step at a feasible point", logio; verbose=verbose)
                     end
                     break
                 elseif (countG >= params.maxcount || countS >= params.maxcount) && !is_feasible
-                    log_message!("⚠️ ALERTA: Algoritmo estagnou mas o ponto NÃO é viável (||h(x)|| = $norm_h_current)", logio; verbose=verbose)
+                    log_message!("⚠️ WARNING: Algorithm stagnated at an infeasible point (||h(x)|| = $norm_h_current)", logio; verbose=verbose)
                 end
             else
-                #SLP OFF, paramos se KKT
+                #SLP OFF, stop if KKT
                 if norm_h_current < tolerance && gpnorm < params.tolG
                     log_message!("-" ^ 120, logio; verbose=verbose)
-                    log_message!("✅ CONVERGÊNCIA: Solução KKT exata encontrada", logio; verbose=verbose)
+                    log_message!("✅ CONVERGENCE: Exact KKT solution found", logio; verbose=verbose)
                     break
                 end
             end
-
             x_old_outer = copy(x)
             norm_h_old = norm_h_current
-
             # ================================================================
-            # STEP 1: RESTORATION PHASE
+            # Step 1: RESTORATION PHASE
             # ================================================================
             if norm_h_current > tolerance
                 y, δr, success_resto = restoration_phase(problem, x, δr, model_restaura; params=params, buffers=buffers, full_log=full_log, iterglobal=iter)
-
                 norm_h_y = norm(problem.h(y))
                 if norm_h_y > params.r_resto * norm_h_old
                     log_message!("❌ FAILURE: ||h(yᵏ)|| > r||h(xᵏ)|| - Insufficient restoration", logio; verbose=verbose)
@@ -1090,52 +934,47 @@ function two_phase_optimization(
                 y = copy(x)
                 success_resto = true
             end
-
             # ================================================================
-            # STEP 2: OPTIMIZATION PHASE
+            # Step 2: OPTIMIZATION PHASE
             # ================================================================
             if params.use_quadratic
                 if norm(buffers.s_val) > 1e-12
                     y_diff = buffers.∇f .- buffers.∇f_old
-                    B = compute_B(params.B_update_strategy, n, buffers.s_val, y_diff, params.σ)
+                    B = compute_B(params.B_update_strategy, n, buffers.s_val, y_diff, params.σ, problem, y,λ)
                 else
                     B = params.σ * spdiagm(0 => ones(n))
                 end
             end
-
             x_new, λ_new, θ_new, δo, success_opt = optimization_phase(
-                problem, 
-                x_old_outer,      
-                λ,                
-                norm_h_old,       
-                y,                
-                δo, 
-                model_opt, 
-                params; 
-                θ_k = θ,          
-                verbose = params.verbose_in, 
-                buffers = buffers, 
-                full_log = full_log, 
-                iterglobal = iter,
-                lagrangian_history = lagrangian_history,
-                merit_history = merit_history
+            problem, 
+            x_old_outer,      
+            λ,                
+            norm_h_old,       
+            y,                
+            δo, 
+            model_opt, 
+            params; 
+            B = B,        
+            θ_k = θ,          
+            verbose = params.verbose_in, 
+            buffers = buffers, 
+            full_log = full_log, 
+            iterglobal = iter,
+            lagrangian_history = lagrangian_history,
+            merit_history = merit_history
             )
-
             # ================================================================
-            # STEP 3: UPDATE AND LOG
+            # Step 3: UPDATE AND LOG
             # ================================================================
             x .= x_new
             λ .= λ_new
             θ = θ_new
-
             f_new = problem.f(x)
             h_new = problem.h(x)
             norm_h_new = norm(h_new)
-
             Δx = norm(x - x_old_outer, Inf)
             ΔF = abs(f_new - f_current)
-
-            # --- Recalcular GP Norm (AGP) ---
+            # --- Recalculate GP Norm (AGP) ---
             grad_f_new = problem.∇f(x)
             jac_h_new = problem.∇h(x)
             Lgrad = grad_f_new + jac_h_new' * λ
@@ -1146,41 +985,34 @@ function two_phase_optimization(
                 gpnorm /= n
             end
             params.debugverbose && println("DEBUG: GPnorm after division (if applicable): $gpnorm")
-
             iter += 1
-
             if history
                 x_hist[iter + 1] = copy(x)
             end
-
-            # === Atualizando a Memória Não-Monótona ===
+            # === Updating Non-Monotonic Memory ===
             lagrangian_new = f_new + dot(λ, h_new)
             merit_new = compute_merit_functions(λ, θ, h_new, f_new)
             
             push!(lagrangian_history, lagrangian_new)
             push!(merit_history, merit_new)
-
             if length(lagrangian_history) > history_size
                 popfirst!(lagrangian_history)
             end
             if length(merit_history) > history_size
                 popfirst!(merit_history)
             end
-
-            # --- Atualizar Contadores SLP ---
+            # --- Update SLP Counters ---
             if params.use_slp_stopping
                 if gpnorm <= params.tolG
                     countG += 1
                 else
                     countG = 0
                 end
-
                 if ΔF <= params.tolF
                     countF += 1
                 else
                     countF = 0
                 end
-
                 if Δx <= params.tolS
                     countS += 1
                 else
@@ -1188,7 +1020,6 @@ function two_phase_optimization(
                 end
             end
 
-            # --- Construir status_symbol ---
             status_symbol = ""
             if params.use_slp_stopping
                 if countG >= params.maxcount && countF >= params.maxcount
@@ -1197,7 +1028,6 @@ function two_phase_optimization(
                     status_symbol = " ✅STEP"
                 end
             end
-
             if status_symbol == ""
                 if !success_resto
                     status_symbol = " ❌R"
@@ -1207,19 +1037,16 @@ function two_phase_optimization(
                     status_symbol = " ⚠️δo"
                 end
             end
-
             d_r_print = (δr isa Vector) ? maximum(δr) : δr
             d_o_print = (δo isa Vector) ? maximum(δo) : δo 
             lambda_print = norm(λ)
 
-            # Log formatado espelhando a topologia
             if params.use_slp_stopping
                 msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10.3e %d|%d|%d%s", iter, f_new, norm_h_new, d_r_print, d_o_print, lambda_print, Δx, gpnorm, countG, countF, countS, status_symbol)
             else
                 msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10.3e %s", iter, f_new, norm_h_new, d_r_print, d_o_print, lambda_print, gpnorm, Δx, status_symbol)
             end
             log_message!(msg, logio; verbose=verbose)
-
             f_current = f_new
             h_current = h_new
             norm_h_current = norm_h_new
@@ -1228,7 +1055,6 @@ function two_phase_optimization(
         # FINALIZATION
         # ================================================================
         log_message!(repeat("=", 120), logio; verbose=verbose)
-
         opstop = if params.use_slp_stopping
             if countG >= params.maxcount && countF >= params.maxcount && norm_h_current < tolerance
                 0
@@ -1237,7 +1063,7 @@ function two_phase_optimization(
             elseif iter >= max_outer_iter
                 2
             else
-                3 # Parou por estagnação inviável ou outro erro
+                3
             end
         else
             if norm_h_current < tolerance && gpnorm < params.tolG
@@ -1248,17 +1074,16 @@ function two_phase_optimization(
                 1
             end
         end
-
         termination_msg = ""
         if params.use_slp_stopping
             termination_msg = if opstop == 0
-                "✅ CONVERGÊNCIA  - KKT CONDITIONS: Gradiente E redução pequenos por $(params.maxcount) iterações consecutivas"
+                "✅ CONVERGENCE - KKT CONDITIONS: Small gradient and reduction sustained for $(params.maxcount) consecutive iterations"
             elseif opstop == 1
-                "✅ CONVERGÊNCIA  - SMALL STEP: Passo pequeno por $(params.maxcount) iterações consecutivas"
+                "✅ CONVERGENCE - SMALL STEP: Sustained small step for $(params.maxcount) consecutive iterations"
             elseif opstop == 2
-                "⏰ MÁXIMO DE ITERAÇÕES: Atingiu limite de $max_outer_iter iterações"
+                "⏰ MAXIMUM ITERATIONS: Reached limit of $max_outer_iter iterations"
             else
-                "❌ TERMINAÇÃO POR FALHA: Problemas na restauração ou otimização"
+                "❌ TERMINATION BY FAILURE: Issues encountered during restoration or optimization phases"
             end
         else
             termination_msg = if opstop == 0
@@ -1269,7 +1094,6 @@ function two_phase_optimization(
                 "⚠️ TERMINATION: Alternative criterion"
             end
         end
-
         log_message!(termination_msg, logio; verbose=verbose)
         log_message!("Optimization finished after $iter iterations.", logio; verbose=verbose)
         log_message!("🎉 Final result:", logio; verbose=verbose)
@@ -1278,7 +1102,6 @@ function two_phase_optimization(
         d_r_print = (δr isa Vector) ? maximum(δr) : δr
         d_o_print = (δo isa Vector) ? maximum(δo) : δo
         log_message!(@sprintf("   δr (max) = %.2e, δo (max) = %.2e", d_r_print, d_o_print), logio; verbose=verbose)
-
         return x, λ, θ, iter, opstop, history ? x_hist[1:(iter + 1)] : nothing, full_log
               
     finally
@@ -1287,5 +1110,4 @@ function two_phase_optimization(
         end
     end
 end
-
 end
