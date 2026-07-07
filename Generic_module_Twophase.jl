@@ -447,7 +447,7 @@ function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::Union{Flo
     
     # Define quadratic matrix
     local Hqp
-    params_slp.use_quadratic && (Hqp = B)
+    params.use_quadratic && (Hqp = B)
 
     # Helper: get trust region radius for dimension i
     get_δ(i) = (δ isa Vector) ? δ[i] : δ

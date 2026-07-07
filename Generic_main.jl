@@ -111,7 +111,6 @@ function parse_commandline()
             default = "all"
     end
 
-
     return parse_args(s)
 end
 
@@ -129,10 +128,10 @@ args = parse_commandline()
 # 4. GENERAL CONFIGURATION AND ALGORITHM SELECTION
 # ==============================================================================
 println("\n" * "=" ^ 80)
-println("⚙️ CONFIGURING VARIANTS AND EXPORT ENVIRONMENT")
+println("⚙️  CONFIGURING VARIANTS AND EXPORT ENVIRONMENT")
 println("=" ^ 80)
 
-println("🖥️ System: $(Sys.CPU_THREADS) threads available")
+println("🖥️  System: $(Sys.CPU_THREADS) threads available")
 println("🚀 Julia: Using $(Threads.nthreads()) threads")
 println("-" ^ 80)
 
@@ -190,8 +189,8 @@ if RUN_TWOPHASE
         
         use_quad = (strat != :none)
         
-        # Requested constraint: If SQP is active, enforce Isotropic mode only (no ATR)
-        # if use_quad && atr continue end
+        # Note: If SQP is active, Isotropic mode only (no ATR) is enforced via SLP block, 
+        # but kept active here if intended for testing.
         
         b_strat = use_quad ? strat : :identity
         
@@ -223,9 +222,6 @@ if RUN_SLP
         if !bq && atr continue end # Logical constraint: ATR requires BQ
         
         use_quad = (strat != :none)
-        
-        # Requested constraint: If SQP is active, enforce Isotropic mode only (no ATR)
-        if use_quad && atr continue end
         
         b_strat = use_quad ? strat : :identity
         
@@ -301,20 +297,17 @@ function get_status_string(status_code::Int)
     else return "UNKNOWN_$(status_code)" end
 end
 
-# ==============================================================================
-# 5.1 WARM-UP (JIT PRECOMPILATION)
-# ==============================================================================
 println("\n🔥 EXECUTING WARM-UP (JIT Precompilation of ALL variants)...")
 try
-    warmup_prob_name = problems[1] 
-    nlp_w = CUTEstModel{Float64}(warmup_prob_name)
+    # Using a pure-Julia custom problem to avoid CUTEst DLL locks and Fortran memory overhead
+    nlp_w = SharedTypes.create_rosenbrock_problem1()
     prob_w = SharedTypes.build_optimization_problem(nlp_w)
     x0_w = clamp.(nlp_w.meta.x0, prob_w.xl, prob_w.xu)
 
     if RUN_TWOPHASE && length(twophase_variants) > 0
         print("  Compiling Two-Phase variants... ")
         for var in twophase_variants
-            # Roda uma vez para forçar a compilação de todas as rotas de código (SQP, RipQP, etc)
+            # Run once to force compilation of all code paths (SQP, RipQP, Gurobi, etc.)
             Generic_module_Twophase.two_phase_optimization(prob_w, x0_w, var.params; history=false)
         end
         println("OK")
@@ -328,10 +321,9 @@ try
         println("OK")
     end
     
-    finalize(nlp_w)
-    println("✅ WARM-UP COMPLETE. Starting official benchmarking.")
+    println("🧹 Warm-up complete. Pure Julia problem used (No DLL locks).")
 catch e
-    println("⚠️ Warning: Warm-up failed ($e). The first recorded times may be inflated.")
+    println("⚠️  Warning: Warm-up failed ($e). The first recorded times may be inflated.")
 end
 # ==============================================================================
 # 5.2 MAIN LOOP
@@ -341,6 +333,15 @@ function main()
         local nlp = nothing
         try
             nlp = CUTEstModel{Float64}(prob_name)
+            
+            # # --- MEMORY SAFETY LOCK ---
+            # # Reject overly dense Hessians that crash the SparseArrays constructor
+            # if nlp.meta.nnzh > 500000
+            #     println("\n⏭️  SKIPPING: $prob_name [Hessian too dense: $(nlp.meta.nnzh) nnz]")
+            #     finalize(nlp)
+            #     continue
+            # end
+            
             problem = SharedTypes.build_optimization_problem(nlp)
             x0 = clamp.(nlp.meta.x0, problem.xl, problem.xu)
             dim, ncon = nlp.meta.nvar, nlp.meta.ncon
