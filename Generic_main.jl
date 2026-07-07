@@ -191,7 +191,7 @@ if RUN_TWOPHASE
         use_quad = (strat != :none)
         
         # Requested constraint: If SQP is active, enforce Isotropic mode only (no ATR)
-        if use_quad && atr continue end
+        # if use_quad && atr continue end
         
         b_strat = use_quad ? strat : :identity
         

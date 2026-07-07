@@ -278,7 +278,7 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
 
         # 1. Preparação da Matriz Hessiana
         local Hqp
-        params_slp.use_quadratic && (Hqp = B + spdiagm(0 => params_slp.σ * ones(n)))
+        params_slp.use_quadratic && (Hqp = B)
 
         # 2. Resolução do Subproblema Principal
         if params_slp.use_quadratic && params_slp.quadratic_solver == :ripqp
