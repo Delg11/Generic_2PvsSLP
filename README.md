@@ -29,7 +29,7 @@ O projeto realiza uma avaliação modular sobre o conjunto de problemas CUTEst, 
 
 ## Parâmetros de Execução (CLI)
 
-O script `Generic_main.jl` suporta diversos argumentos via linha de comando para customizar a execução dos testes e realizar a ablação de características.
+O script `Generic_main.jl` suporta diversos argumentos via linha de comando para customizar a execução dos testes e realizar a habilitação de características.
 
 | Argumento | Atalho | Padrão | Descrição |
 | :--- | :---: | :--- | :--- |
