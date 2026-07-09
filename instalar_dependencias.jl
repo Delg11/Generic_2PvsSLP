@@ -15,7 +15,9 @@ pacotes_externos = [
     "ADNLPModels",
     "NLPModels",
     "JuMP",
-    "Gurobi"
+    "Gurobi",
+    "RipQP",
+    "QuadraticModels"
 ]
 
 println("Iniciando o download e registro dos pacotes no Project.toml...")
