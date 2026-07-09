@@ -17,26 +17,10 @@
     <script type="text/babel">
         const { useState, useEffect, useRef, useMemo } = React;
 
-        // =====================================================================
-        // CONFIGURAÇÃO DOS BANCOS DE DADOS
-        // Adicione novas chaves aqui quando gerar novos CSVs
-        // =====================================================================
-        const availableDatasets = {
-            'principal': {
-                name: 'Benchmark Principal',
-                files: ['./benchmark_slp.csv', './benchmark_twophase.csv']
-            },
-            'alta_dimensao': {
-                name: 'Alta Dimensão (Exemplo)',
-                files: ['./benchmark_slp_high.csv', './benchmark_twophase_high.csv']
-            }
-        };
-
         function App() {
             const [data, setData] = useState([]);
-            const [datasetId, setDatasetId] = useState('principal');
             const [metric, setMetric] = useState('Time_ms');
-            const [loadingState, setLoadingState] = useState('Inicializando...');
+            const [loadingState, setLoadingState] = useState('Baixando dados do GitHub...');
             const plotDivRef = useRef(null);
 
             const [filters, setFilters] = useState({});
@@ -70,13 +54,15 @@
                 setLoadingState('');
             };
 
-            // Auto-load dos CSVs baseados no dropdown
+            // Auto-load dos CSVs diretos do repositório GitHub
             useEffect(() => {
                 const loadData = () => {
-                    setData([]); // Limpa a tela
-                    setLoadingState(`Baixando arquivos: ${availableDatasets[datasetId].name}...`);
+                    // Usando as URLs RAW do GitHub
+                    const files = [
+                        'https://raw.githubusercontent.com/Delg11/Generic_2PvsSLP/main/benchmark_slp.csv',
+                        'https://raw.githubusercontent.com/Delg11/Generic_2PvsSLP/main/benchmark_twophase.csv'
+                    ];
                     
-                    const files = availableDatasets[datasetId].files;
                     let allRows = [];
                     let filesProcessed = 0;
                     let hasError = false;
@@ -95,13 +81,13 @@
                             },
                             error: (err) => {
                                 hasError = true;
-                                setLoadingState(`Erro 404: Arquivo ${fileUrl} não encontrado. Faça upload manual.`);
+                                setLoadingState(`Falha ao conectar com o GitHub. Use o upload manual.`);
                             }
                         });
                     });
                 };
                 loadData();
-            }, [datasetId]);
+            }, []);
 
             // Fallback: Upload manual
             const handleFileUpload = (event) => {
@@ -203,7 +189,6 @@
                         type: 'scatter',
                         name: variantName,
                         line: { shape: 'hv', width: 2.5 },
-                        // INJEÇÃO DIRETA DO NOME DA VARIANTE NO TEMPLATE
                         hovertemplate: `<b>${variantName}</b><br>τ: %{x:.2f}<br>Resolvidos: %{y:.2%}<extra></extra>`,
                         n_solved: ratios.length, 
                         n_probs: n_probs
@@ -275,15 +260,6 @@
                     <div className="w-1/4 min-w-[300px] bg-gray-100 p-4 border-r overflow-y-auto flex flex-col">
                         <h1 className="text-xl font-bold text-gray-800 mb-6">Bench Dashboard</h1>
                         
-                        <div className="mb-6">
-                            <h3 className="font-semibold text-sm uppercase text-gray-600 mb-2">Base de Dados</h3>
-                            <select value={datasetId} onChange={(e) => setDatasetId(e.target.value)} className="w-full border-gray-300 rounded shadow-sm p-2 text-sm focus:ring-blue-500 focus:border-blue-500">
-                                {Object.entries(availableDatasets).map(([id, info]) => (
-                                    <option key={id} value={id}>{info.name}</option>
-                                ))}
-                            </select>
-                        </div>
-
                         <div className="mb-6 bg-white p-3 rounded-lg shadow-sm border border-gray-200">
                             <label className="block text-sm font-medium text-gray-700 mb-2">Upload Manual (Fallback)</label>
                             <input type="file" multiple accept=".csv" onChange={handleFileUpload} className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer"/>
