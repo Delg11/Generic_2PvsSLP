@@ -1,6 +1,6 @@
-module Generic_module_slp
+module Generic_module_unif
 
-export solve_slp_trust_region
+export solve_unif_trust_region
 
 using NLPModels, Printf, JuMP, Gurobi, LinearAlgebra, RipQP,SparseArrays, QuadraticModels
 using ..SharedTypes
@@ -15,7 +15,7 @@ function log_message!(msg; verbose=true)
 end
 
 
-function quadratic_backtracking_step!(
+function parabolic_heuristic_step!(
     δ_current::Union{Float64, Vector{Float64}},
     f_current::Float64,
     f_new::Float64,
@@ -179,9 +179,9 @@ function compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{
 end
 
 # ==============================================================================
-# MAIN SLP SOLVER (Logic adapted from StrSLP.jl)
+# MAIN UNIF SOLVER (Logic adapted from StrUNIF.jl)
 # ==============================================================================
-function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, params_slp::SLPParams)
+function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, params_unif::UNIFParams)
     # --- Inicialização ---
     x = clamp.(copy(x0), prob.xl, prob.xu)
     # n, m = prob.n, prob.m
@@ -193,10 +193,10 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
     grad_old = copy(grad)
     h_val = prob.h(x)
     jac = prob.∇h(x)
-    if params_slp.anisotropic_trust_region
-        delta = fill(params_slp.delta0, n)
+    if params_unif.anisotropic_trust_region
+        delta = fill(params_unif.delta0, n)
     else
-        delta = params_slp.delta0
+        delta = params_unif.delta0
     end
     iter = 0
     itrej = 0
@@ -210,7 +210,7 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
     push!(x_accepted, copy(x))
 
     # 2. Histórico Completo (Tentativas, Rejeições, Deltas)
-    full_log = Vector{StepLog_SLP}()
+    full_log = Vector{StepLog_UNIF}()
 
     theta = 1.0;
     theta1 = 1.0;
@@ -219,7 +219,7 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
     # GUROBI_ENV = Gurobi.Env(output_flag=0)
     lambda = zeros(m)
 
-    if params_slp.verbose
+    if params_unif.verbose
         log_message!(repeat("=", 120))
         # @printf("%-4s %-12s %-8s %-8s %-10s %-6s %-12s\n", "It", "F(x)", "delta", "||s||", "Ared", "Acc", "Cnt(G|F|S)")
         @printf("%-4s %-12s %-10s %-8s %-8s %-8s %-8s %-10s %-6s %-12s\n", 
@@ -242,7 +242,7 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
 
     tol_check = 1e-6
     if (gpnorm < tol_check) && (feas_violation < tol_check) && (bound_violation < tol_check)
-        if params_slp.verbose
+        if params_unif.verbose
             ;
             println("✅ CONVERGED AT START: KKT satisfied.");
         end
@@ -251,17 +251,17 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
     # ==========================================================================
     # MAIN LOOP (Condição idêntica ao MATLAB)
     # ==========================================================================
-    while ((countG < params_slp.maxcount || countF < params_slp.maxcount) && (countS < params_slp.maxcount) && (iter < params_slp.maxiter))
+    while ((countG < params_unif.maxcount || countF < params_unif.maxcount) && (countS < params_unif.maxcount) && (iter < params_unif.maxiter))
 
-        params_slp.debugverbose && println("\n🔍 [DEBUG-SLP] === Iteration $(iter+1) started ===")
-        params_slp.debugverbose && println("🔍 [DEBUG-SLP] Current State: F(x) = $F, aredfsb = $feas_violation, delta = $delta")
+        params_unif.debugverbose && println("\n🔍 [DEBUG-UNIF] === Iteration $(iter+1) started ===")
+        params_unif.debugverbose && println("🔍 [DEBUG-UNIF] Current State: F(x) = $F, aredfsb = $feas_violation, delta = $delta")
 
-        if params_slp.use_quadratic
+        if params_unif.use_quadratic
             if norm(s_sol) > 1e-12
                 y_diff = grad .- grad_old
-                B = compute_B(params_slp.B_update_strategy, n, s_sol, y_diff, params_slp.σ, prob, x,lambda)
+                B = compute_B(params_unif.B_update_strategy, n, s_sol, y_diff, params_unif.σ, prob, x,lambda)
             else
-                B = params_slp.σ * spdiagm(0 => ones(n))
+                B = params_unif.σ * spdiagm(0 => ones(n))
             end
         end
 
@@ -278,16 +278,16 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
 
         # 1. Preparação da Matriz Hessiana
         local Hqp
-        params_slp.use_quadratic && (Hqp = B)
+        params_unif.use_quadratic && (Hqp = B)
 
         # 2. Resolução do Subproblema Principal
-        if params_slp.use_quadratic && params_slp.quadratic_solver == :ripqp
+        if params_unif.use_quadratic && params_unif.quadratic_solver == :ripqp
             # -------------------------------------------------
             # Fluxo RipQP
             # -------------------------------------------------
             qm = QuadraticModel(grad, Hqp; A = jac, lcon = -h_val, ucon = -h_val, lvar = sL, uvar = sU, c0 = 0.0)
             
-            stats = ripqp(qm, display=(params_slp.output_flag == 1))
+            stats = ripqp(qm, display=(params_unif.output_flag == 1))
             # println(stats)
             if stats.status == :first_order || stats.status == :acceptable
                 s_sol = stats.solution
@@ -296,18 +296,18 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
                     lambda = stats.multipliers[1:m]
                 end
                 success_opt = true
-                params_slp.debugverbose && println("🔍 [DEBUG-SQP] Subproblem solved optimally (RipQP). obj_val = $lp_obj_val")
+                params_unif.debugverbose && println("🔍 [DEBUG-SQP] Subproblem solved optimally (RipQP). obj_val = $lp_obj_val")
             end
             
         else
             # -------------------------------------------------
             # Fluxo Original (JuMP + Gurobi)
             # -------------------------------------------------
-            model = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), "OutputFlag" => params_slp.output_flag))
+            model = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), "OutputFlag" => params_unif.output_flag))
 
             @variable(model, s[i = 1:n])
             
-            if params_slp.use_quadratic
+            if params_unif.use_quadratic
                 @objective(model, Min, 0.5 * dot(s, Hqp * s) + dot(grad, s))
             else
                 @objective(model, Min, dot(grad, s))
@@ -333,17 +333,17 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
                     lambda = dual.(lp_cons)
                 end
                 success_opt = true
-                mode_str = params_slp.use_quadratic ? "SQP" : "SLP"
-                params_slp.debugverbose && println("🔍 [DEBUG-$mode_str] Subproblem solved optimally (Gurobi). obj_val = $lp_obj_val")
+                mode_str = params_unif.use_quadratic ? "SQP" : "UNIF"
+                params_unif.debugverbose && println("🔍 [DEBUG-$mode_str] Subproblem solved optimally (Gurobi). obj_val = $lp_obj_val")
             end
         end
 
         # 3. Restauration Phase (if subproblem fails)
         if !success_opt
-            params_slp.debugverbose && println("⚠️ [DEBUG-SLP] Subproblem infeasible/failed. Entering RESTORATION phase.")
+            params_unif.debugverbose && println("⚠️ [DEBUG-UNIF] Subproblem infeasible/failed. Entering RESTORATION phase.")
             
             current_phase = :restoration
-            model2 = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), "OutputFlag" => params_slp.output_flag))
+            model2 = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), "OutputFlag" => params_unif.output_flag))
             
             @variable(model2, s2[i = 1:n])
 
@@ -370,9 +370,9 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
             if termination_status(model2) == MOI.OPTIMAL
                 s_sol = value.(s2)
                 lp_obj_val = dot(grad, s_sol)
-                params_slp.debugverbose && println("🔍 [DEBUG-SLP] Restoration solved. lp_obj_val = $lp_obj_val")
+                params_unif.debugverbose && println("🔍 [DEBUG-UNIF] Restoration solved. lp_obj_val = $lp_obj_val")
             else
-                params_slp.debugverbose && println("🚫 [DEBUG-SLP] Restoration failed completely. s_sol = 0")
+                params_unif.debugverbose && println("🚫 [DEBUG-UNIF] Restoration failed completely. s_sol = 0")
                 s_sol = zeros(n)
             end
         end
@@ -404,9 +404,9 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
         aredopt = F - F_trial
         aredfsb = vio_curr - vio_trial
 
-        params_slp.debugverbose && println("\n🔍 [DEBUG-SLP] --- Pred & Ared Breakdown ---")
-        params_slp.debugverbose && println("   [Opt]  aredopt (F - F_trial)      = $aredopt  |  predopt (-lp_obj) = $predopt")
-        params_slp.debugverbose && println("   [Fsb]  aredfsb (vio_curr - trial) = $aredfsb  |  predfsb (vio_curr) = $predfsb")
+        params_unif.debugverbose && println("\n🔍 [DEBUG-UNIF] --- Pred & Ared Breakdown ---")
+        params_unif.debugverbose && println("   [Opt]  aredopt (F - F_trial)      = $aredopt  |  predopt (-lp_obj) = $predopt")
+        params_unif.debugverbose && println("   [Fsb]  aredfsb (vio_curr - trial) = $aredfsb  |  predfsb (vio_curr) = $predfsb")
 
         # Atualização Theta
         thetaMin = min(theta1, theta2)
@@ -425,33 +425,33 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
         theta1 = theta
 
 
-        params_slp.debugverbose && println("🔍 [DEBUG-SLP] Theta Logic: predopt > 0.5*predfsb? $(predopt > 0.5 * predfsb)")
-        params_slp.debugverbose && println("🔍 [DEBUG-SLP] Theta Updated: $theta_old -> $theta")
+        params_unif.debugverbose && println("🔍 [DEBUG-UNIF] Theta Logic: predopt > 0.5*predfsb? $(predopt > 0.5 * predfsb)")
+        params_unif.debugverbose && println("🔍 [DEBUG-UNIF] Theta Updated: $theta_old -> $theta")
 
         pred = theta * predopt + (1 - theta) * predfsb
         ared = theta * aredopt + (1 - theta) * aredfsb
 
         rho = abs(pred) < 1e-12 ? (ared >= 0 ? Inf : -Inf) : (ared / pred)
-        params_slp.debugverbose && println("🔍 [DEBUG-SLP] Final Ared = $ared  |  Final Pred = $pred")
-        params_slp.debugverbose && println("🔍 [DEBUG-SLP] Ratio (ared/pred) ρ = $rho")
+        params_unif.debugverbose && println("🔍 [DEBUG-UNIF] Final Ared = $ared  |  Final Pred = $pred")
+        params_unif.debugverbose && println("🔍 [DEBUG-UNIF] Ratio (ared/pred) ρ = $rho")
 
         # -------------------------------------------------
         # 3. Aceitação e Atualização
         # -------------------------------------------------
         step_accepted = false
-        threshold = params_slp.eta * pred
+        threshold = params_unif.eta * pred
         if abs(pred) < 1e-12
             step_accepted = (ared >= 0)
-            params_slp.debugverbose && println("🔍 [DEBUG-SLP] Check: pred is ~0. Accepted if ared >= 0. Result: $step_accepted")
+            params_unif.debugverbose && println("🔍 [DEBUG-UNIF] Check: pred is ~0. Accepted if ared >= 0. Result: $step_accepted")
         else
-            # step_accepted = (ared >= params_slp.eta * pred)
+            # step_accepted = (ared >= params_unif.eta * pred)
             step_accepted = (ared >= threshold)
-            params_slp.debugverbose && println("🔍 [DEBUG-SLP] Check: ared ($ared) >= threshold ($threshold). Result: $step_accepted")
+            params_unif.debugverbose && println("🔍 [DEBUG-UNIF] Check: ared ($ared) >= threshold ($threshold). Result: $step_accepted")
         end
 
         # Gravando a tentativa antes de atualizar
         delta_log = delta isa Vector ? copy(delta) : delta
-        log_entry = StepLog_SLP(
+        log_entry = StepLog_UNIF(
             iter + 1,       # Número da iteração atual
             copy(x),        # De onde saiu
             copy(x_trial),  # Para onde tentou ir
@@ -466,14 +466,14 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
 
         accept_symbol = step_accepted ? "✓" : "✗"
 
-        # if params_slp.verbose
+        # if params_unif.verbose
         #     # Formatação compacta para debug
         #     counters_str = "$(countG)|$(countF)|$(countS)"
         #     @printf("%-4d %-12.5e %-8.2e %-8.2e %-10.3e %-6s %-12s\n", iter+1, F, delta, snorm, ared, accept_symbol, counters_str)
         # end
         slope_val = dot(grad, s_sol)
         if step_accepted
-            params_slp.debugverbose && println("✅ [DEBUG-SLP] >> STEP ACCEPTED <<")
+            params_unif.debugverbose && println("✅ [DEBUG-UNIF] >> STEP ACCEPTED <<")
             x = x_trial
             Fold = F
             F = F_trial
@@ -486,32 +486,32 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
             # Trust Region Update
             delta_old = copy(delta)
 
-            if !params_slp.backtracking_quadratic
-                if params_slp.aredpred_ratio
+            if !params_unif.parabolic_heuristic
+                if params_unif.strong_agreement_rule
                     # Lógica tradicional baseada na razão de redução
-                    if ared >= params_slp.rho * pred
-                        delta = min.(params_slp.alphaA * delta, 1.0)
-                        params_slp.debugverbose && println("📈 [DEBUG-SLP] Great step! Trust Region expanded: $delta_old -> $delta (ρ >= $(params_slp.rho))")
+                    if ared >= params_unif.rho * pred
+                        delta = min.(params_unif.alphaA * delta, 1.0)
+                        params_unif.debugverbose && println("📈 [DEBUG-UNIF] Great step! Trust Region expanded: $delta_old -> $delta (ρ >= $(params_unif.rho))")
                     else
-                        params_slp.debugverbose && println("🔄 [DEBUG-SLP] Good step, but not great. Trust Region kept at: $delta (ρ < $(params_slp.rho))")
+                        params_unif.debugverbose && println("🔄 [DEBUG-UNIF] Good step, but not great. Trust Region kept at: $delta (ρ < $(params_unif.rho))")
                     end
                 else
-                    # Expansão incondicional (Ablação do APR ativada)
-                    delta = min.(params_slp.alphaA * delta, 1.0)
-                    params_slp.debugverbose && println("📈 [DEBUG-SLP] Trust Region unconditionally expanded: $delta_old -> $delta")
+                    # Expansão incondicional (Ablação do SAR ativada)
+                    delta = min.(params_unif.alphaA * delta, 1.0)
+                    params_unif.debugverbose && println("📈 [DEBUG-UNIF] Trust Region unconditionally expanded: $delta_old -> $delta")
                 end
             else
                 # Lógica de expansão via modelo quadrático
-                params_slp.debugverbose && println("🔍 [DEBUG-SLP] Applying Quadratic Backtracking for Trust Region expansion.")
-                delta = quadratic_backtracking_step!(
-                    delta, Fold, F_trial, slope_val, params_slp, snorm, norm(s_sol)^2, :increase;
-                    anisotropic=params_slp.anisotropic_trust_region, 
+                params_unif.debugverbose && println("🔍 [DEBUG-UNIF] Applying Parabolic Heuristic for Trust Region expansion.")
+                delta = parabolic_heuristic_step!(
+                    delta, Fold, F_trial, slope_val, params_unif, snorm, norm(s_sol)^2, :increase;
+                    anisotropic=params_unif.anisotropic_trust_region, 
                     s_vec=s_sol, 
                     grad=grad,                
-                    min_reduction_ratio=params_slp.parabolic_min_reduction_ratio,
-                    max_reduction_ratio=params_slp.parabolic_max_reduction_ratio,
-                    min_increase_ratio=params_slp.parabolic_min_increase_ratio,
-                    max_increase_ratio=params_slp.parabolic_max_increase_ratio,
+                    min_reduction_ratio=params_unif.parabolic_min_reduction_ratio,
+                    max_reduction_ratio=params_unif.parabolic_max_reduction_ratio,
+                    min_increase_ratio=params_unif.parabolic_min_increase_ratio,
+                    max_increase_ratio=params_unif.parabolic_max_increase_ratio,
                 )
             end
             
@@ -525,27 +525,27 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
         else
             delta_old = copy(delta)
             # Passo rejeitado: reduz a região de confiança
-            if params_slp.backtracking_quadratic
+            if params_unif.parabolic_heuristic
                 
                 # === Alternância Shrink / Reshape ===
                 # Se a iteração for par, usa :shrink. Se for ímpar, usa :reshape.
                 current_mode = (iter % 2 == 0) ? :shrink : :reshape
                 
-                params_slp.debugverbose && println("📉 [DEBUG-SLP] Redução Anisotrópica - Modo: $current_mode (Iter: $iter)")
+                params_unif.debugverbose && println("📉 [DEBUG-UNIF] Redução Anisotrópica - Modo: $current_mode (Iter: $iter)")
 
-                delta = quadratic_backtracking_step!(
-                    delta, F, F_trial, slope_val, params_slp, snorm, norm(s_sol)^2, :decrease;
-                    anisotropic=params_slp.anisotropic_trust_region, 
+                delta = parabolic_heuristic_step!(
+                    delta, F, F_trial, slope_val, params_unif, snorm, norm(s_sol)^2, :decrease;
+                    anisotropic=params_unif.anisotropic_trust_region, 
                     s_vec=s_sol, 
                     grad=grad,
                     mode=current_mode
                 )
             else
                 # Fallback tradicional (seguro para escalar e vetor)
-                delta = max.(params_slp.alphaR * snorm, 0.1 .* delta)
+                delta = max.(params_unif.alphaR * snorm, 0.1 .* delta)
             end
-            params_slp.debugverbose && println("🚫 [DEBUG-SLP] >> STEP REJECTED <<")
-            params_slp.debugverbose && println("📉 [DEBUG-SLP] Trust Region shrunk: $delta_old -> $delta")
+            params_unif.debugverbose && println("🚫 [DEBUG-UNIF] >> STEP REJECTED <<")
+            params_unif.debugverbose && println("📉 [DEBUG-UNIF] Trust Region shrunk: $delta_old -> $delta")
             itrej += 1
         end
 
@@ -563,19 +563,19 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
         gpnorm = norm(proj_dir_k .- x, Inf)
 
         # Atualização dos Contadores (igual ao MATLAB)
-        if gpnorm <= params_slp.tolG
+        if gpnorm <= params_unif.tolG
             countG += 1
         else
             countG = 0
         end
 
-        if abs(ared) <= params_slp.tolF
+        if abs(ared) <= params_unif.tolF
             countF += 1
         else
             countF = 0
         end
 
-        if snorm <= params_slp.tolS
+        if snorm <= params_unif.tolS
             countS += 1
         else
             countS = 0
@@ -584,7 +584,7 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
         # -------------------------------------------------
         # 5. Log da Iteração (Com os contadores)
         # -------------------------------------------------
-        if params_slp.verbose
+        if params_unif.verbose
             # Formata string "G|F|S"
             counters_str = "$(countG)|$(countF)|$(countS)"
             delta_disp = delta isa Vector ? maximum(delta) : delta
@@ -594,33 +594,33 @@ function solve_slp_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, 
             end # Fim do While
 
 
-    if (countG >= params_slp.maxcount && countF >= params_slp.maxcount)
+    if (countG >= params_unif.maxcount && countF >= params_unif.maxcount)
         if is_feasible
             opstop = 0 # KKT satisfied & feasible
-            if params_slp.verbose
+            if params_unif.verbose
                 println("\n✅ Converged: KKT & Reduction criteria met.");
             end
         else
             opstop = 3 # Infeasible stationary point
-            if params_slp.verbose
+            if params_unif.verbose
                 println("\n⚠️ Converged to an INFEASIBLE stationary point (||h(x)|| = $vio_curr).");
             end
         end
-    elseif (countS >= params_slp.maxcount)
+    elseif (countS >= params_unif.maxcount)
         if is_feasible
             opstop = 1 # Step norm small & feasible
-            if params_slp.verbose
+            if params_unif.verbose
                 println("\n✅ Converged: Step size small.");
             end
         else
             opstop = 4 # Stalled infeasible
-            if params_slp.verbose
+            if params_unif.verbose
                 println("\n❌ Stalled: Step size small but point is INFEASIBLE (||h(x)|| = $vio_curr).");
             end
         end
     else
         opstop = 2 # Max iter
-        if params_slp.verbose
+        if params_unif.verbose
             println("\n⚠️ Max iterations reached.");
         end
     end

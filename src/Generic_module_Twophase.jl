@@ -310,7 +310,7 @@ function restoration_phase(
         # Step 7: Adaptive trust region update
         # (Feito APÓS a aceitação do passo para preparar o próximo ℓ)
         # =========================================================
-        if params.use_ratio_update && ℓ > 0 && c_prev > params.ratio_safeguard_tol && @isdefined(c_new)
+        if params.restoration_ratio_update && ℓ > 0 && c_prev > params.ratio_safeguard_tol && @isdefined(c_new)
             ratio = clamp(c_new / c_prev, params.ratio_min_factor, params.ratio_max_factor)
             δ = clamp.(ratio .* δ, params.δmin, params.δmax)
         end
@@ -326,7 +326,7 @@ function restoration_phase(
 end
 
 # Calculates trust region radius using quadratic interpolation models
-function quadratic_backtracking_step!(
+function parabolic_heuristic_step!(
     δ_current::Union{Float64, Vector{Float64}},
     f_current::Float64,
     f_new::Float64,
@@ -617,31 +617,31 @@ function optimization_phase(
             consecutive_rejects += 1
             buffers.x_temp .= buffers.x_old # Take back de old step
             
-            if params.use_slp_stopping && ((δ isa Vector) ? maximum(δ) : δ) <= params.δmin
+            if params.use_unif_stopping && ((δ isa Vector) ? maximum(δ) : δ) <= params.δmin
                 verbose && println("⚠️ δ too small, aborting optimization")
                 return y, buffers.λ, θ_k, δ, false
             end
             # Trust region reduction post-rejection
-            if !params.backtracking_quadratic
+            if !params.parabolic_heuristic
                 s_ref = (δ isa Vector) ? abs.(buffers.s_val) : norm(buffers.s_val, Inf)
                 δ_old = copy(δ)
                 δ = clamp.(max.(δ .* params.τ1, s_ref .* params.τ2), params.δmin, params.δmax)
                 params.debugverbose && println("🔍 [DEBUG-OPT] Standard Shrink: δ changed from $δ_old to $δ")
             else
-                verbose && println("🔄 Lagrangian test failure, applying backtracking")
+                verbose && println("🔄 Lagrangian test failure, applying parabolic heuristic")
                 s_inf = norm(buffers.s_val, Inf)
 
                 if params.anisotropic_trust_region
-                backtracking_mode = isodd(consecutive_rejects) ? :reshape : :shrink
+                parabolic_heuristic_mode = isodd(consecutive_rejects) ? :reshape : :shrink
                 else
-                backtracking_mode = :shrink
+                parabolic_heuristic_mode = :shrink
                 end
-                params.debugverbose && println("🔍 [DEBUG-OPT] Quad Backtracking (mode: $backtracking_mode). Consecutive rejects: $consecutive_rejects")
-                δ = quadratic_backtracking_step!(
+                params.debugverbose && println("🔍 [DEBUG-OPT] Parabolic Heuristic (mode: $parabolic_heuristic_mode). Consecutive rejects: $consecutive_rejects")
+                δ = parabolic_heuristic_step!(
                     δ, L_y_lambda, L_zj_lambda, f_model, params, 
                     s_inf, step_norm_sq, :decrease; 
                     anisotropic=params.anisotropic_trust_region, 
-                    s_vec=buffers.s_val, grad=buffers.∇f, mode=backtracking_mode,
+                    s_vec=buffers.s_val, grad=buffers.∇f, mode=parabolic_heuristic_mode,
                     min_reduction_ratio=params.parabolic_min_reduction_ratio,
                     max_reduction_ratio=params.parabolic_max_reduction_ratio,
                     min_increase_ratio=params.parabolic_min_increase_ratio,
@@ -715,7 +715,7 @@ function optimization_phase(
             params.debugverbose && println("🚫 [DEBUG-OPT] REJECTED by Merit Function! Φ(z^j) is $gap_merit ABOVE threshold.")
             
             buffers.x_temp .= buffers.x_old 
-            if params.use_slp_stopping && ((δ isa Vector) ? maximum(δ) : δ) <= params.δmin + 1e-9
+            if params.use_unif_stopping && ((δ isa Vector) ? maximum(δ) : δ) <= params.δmin + 1e-9
                 verbose && println("⚠️ δ too small, aborting optimization")
                 return y, buffers.λ, θ, δ, false
             end
@@ -738,14 +738,14 @@ function optimization_phase(
         buffers.∇f_old .= ∇f_new_accepted
         
         # Trust region expansion
-        if !params.backtracking_quadratic
-            if params.aredpred_ratio
+        if !params.parabolic_heuristic
+            if params.strong_agreement_rule
                 ared = L_y_lambda - L_zj_lambda
                 pred = L_y_lambda - f_model
                 
-                rho_slp = 0.5
+                rho_unif = 0.5
                 
-                if ared >= rho_slp * pred
+                if ared >= rho_unif * pred
                     δ_old = copy(δ)
                     δ = min.(δ ./ params.τ3, params.δmax)
                     params.debugverbose && println("🔍 [DEBUG-OPT] Trust Region expanded from $δ_old to $δ")
@@ -758,7 +758,7 @@ function optimization_phase(
         else
             params.debugverbose && println("🔍 [DEBUG-OPT] Applying Quadratic Backtracking for Trust Region expansion.")
             s_inf = norm(buffers.s_val, Inf)
-            δ = quadratic_backtracking_step!(
+            δ = parabolic_heuristic_step!(
                 δ, L_y_lambda, L_zj_lambda, f_model, params, 
                 s_inf, step_norm_sq, :increase; 
                 anisotropic=params.anisotropic_trust_region, 
@@ -854,7 +854,7 @@ function two_phase_optimization(
         if (gpnorm < params.tolG) && (norm_h_current < tolerance)
             log_message!("✅ INITIAL SOLUTION IS OPTIMAL!", logio; verbose=verbose)
             log_message!("   KKT conditions are satisfied.", logio; verbose=verbose)
-            if params.use_slp_stopping
+            if params.use_unif_stopping
                 countG = params.maxcount
                 countF = params.maxcount
             end
@@ -868,7 +868,7 @@ function two_phase_optimization(
         log_message!(repeat("=", 120), logio; verbose=verbose)
         log_message!("                    TWO-PHASE OPTIMIZATION - ALGORITHM 4.3", logio; verbose=verbose)
         log_message!(repeat("=", 120), logio; verbose=verbose)
-        if params.use_slp_stopping
+        if params.use_unif_stopping
             msg = @sprintf("%-4s %-12s %-10s %-8s %-8s %-9s %-10s %-10s %-18s", "k", "f(xᵏ)", "||h(xᵏ)||", "δr", "δo", "||λ||", "||Δx||", "||gpnorm||", "(G|F|S)")
         else
             msg = @sprintf("%-4s %-12s %-10s %-8s %-8s %-9s %-10s  %-10s", "k", "f(xᵏ)", "||h(xᵏ)||", "δr", "δo", "||λ||", "||gpnorm||", "||Δx||")
@@ -878,7 +878,7 @@ function two_phase_optimization(
         d_r_print = (δr isa Vector) ? maximum(δr) : δr
         d_o_print = (δo isa Vector) ? maximum(δo) : δo
         lambda_print_init = norm(λ)
-        if params.use_slp_stopping
+        if params.use_unif_stopping
             msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10s %-10.3e %-18s", 0, f_current, norm_h_current, d_r_print, d_o_print, lambda_print_init, "-", gpnorm, "0|0|0")
         else
             msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10s", 0, f_current, norm_h_current, d_r_print, d_o_print, lambda_print_init, gpnorm, "-")
@@ -888,15 +888,15 @@ function two_phase_optimization(
         while iter < max_outer_iter
             
             # --- Convergence checking ---
-            if params.use_slp_stopping
+            if params.use_unif_stopping
                 is_feasible = norm_h_current < tolerance
                 
-                slp_converged_kkt = (countG >= params.maxcount && countF >= params.maxcount && is_feasible)
+                unif_converged_kkt = (countG >= params.maxcount && countF >= params.maxcount && is_feasible)
 
-                slp_converged_step = (countS >= params.maxcount && is_feasible) 
-                if slp_converged_kkt || slp_converged_step
+                unif_converged_step = (countS >= params.maxcount && is_feasible) 
+                if unif_converged_kkt || unif_converged_step
                     log_message!("-" ^ 120, logio; verbose=verbose)
-                    if slp_converged_kkt
+                    if unif_converged_kkt
                         log_message!("✅ CONVERGENCE - KKT CONDITIONS: Small gradient, reduction, and constraint violation", logio; verbose=verbose)
                     else
                         log_message!("✅ CONVERGENCE - SMALL STEP: Sufficiently small step at a feasible point", logio; verbose=verbose)
@@ -906,7 +906,7 @@ function two_phase_optimization(
                     log_message!("⚠️ WARNING: Algorithm stagnated at an infeasible point (||h(x)|| = $norm_h_current)", logio; verbose=verbose)
                 end
             else
-                #SLP OFF, stop if KKT
+                #UNIF OFF, stop if KKT
                 if norm_h_current < tolerance && gpnorm < params.tolG
                     log_message!("-" ^ 120, logio; verbose=verbose)
                     log_message!("✅ CONVERGENCE: Exact KKT solution found", logio; verbose=verbose)
@@ -999,8 +999,8 @@ function two_phase_optimization(
             if length(merit_history) > history_size
                 popfirst!(merit_history)
             end
-            # --- Update SLP Counters ---
-            if params.use_slp_stopping
+            # --- Update UNIF Counters ---
+            if params.use_unif_stopping
                 if gpnorm <= params.tolG
                     countG += 1
                 else
@@ -1019,7 +1019,7 @@ function two_phase_optimization(
             end
 
             status_symbol = ""
-            if params.use_slp_stopping
+            if params.use_unif_stopping
                 if countG >= params.maxcount && countF >= params.maxcount
                     status_symbol = " ✅KKT"
                 elseif countS >= params.maxcount
@@ -1039,7 +1039,7 @@ function two_phase_optimization(
             d_o_print = (δo isa Vector) ? maximum(δo) : δo 
             lambda_print = norm(λ)
 
-            if params.use_slp_stopping
+            if params.use_unif_stopping
                 msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10.3e %d|%d|%d%s", iter, f_new, norm_h_new, d_r_print, d_o_print, lambda_print, Δx, gpnorm, countG, countF, countS, status_symbol)
             else
                 msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10.3e %s", iter, f_new, norm_h_new, d_r_print, d_o_print, lambda_print, gpnorm, Δx, status_symbol)
@@ -1053,7 +1053,7 @@ function two_phase_optimization(
         # FINALIZATION
         # ================================================================
         log_message!(repeat("=", 120), logio; verbose=verbose)
-        opstop = if params.use_slp_stopping
+        opstop = if params.use_unif_stopping
             if countG >= params.maxcount && countF >= params.maxcount && norm_h_current < tolerance
                 0
             elseif countS >= params.maxcount && norm_h_current < tolerance
@@ -1073,7 +1073,7 @@ function two_phase_optimization(
             end
         end
         termination_msg = ""
-        if params.use_slp_stopping
+        if params.use_unif_stopping
             termination_msg = if opstop == 0
                 "✅ CONVERGENCE - KKT CONDITIONS: Small gradient and reduction sustained for $(params.maxcount) consecutive iterations"
             elseif opstop == 1

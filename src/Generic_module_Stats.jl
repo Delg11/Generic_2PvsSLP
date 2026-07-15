@@ -40,19 +40,19 @@ function run_statistical_analysis(results_dir::String)
     println("📊 STARTING CONSOLIDATED ANALYSIS AND STATISTICS")
     println("=" ^ 80)
 
-    slp_file = joinpath(results_dir, "partial_backup_slp.csv")
+    unif_file = joinpath(results_dir, "partial_backup_unif.csv")
     tp_file = joinpath(results_dir, "partial_backup_twophase.csv")
 
     println("Loading databases...")
-    df_slp = isfile(slp_file) ? CSV.read(slp_file, DataFrame) : DataFrame()
+    df_unif = isfile(unif_file) ? CSV.read(unif_file, DataFrame) : DataFrame()
     df_tp = isfile(tp_file) ? CSV.read(tp_file, DataFrame) : DataFrame()
 
-    if nrow(df_slp) == 0 && nrow(df_tp) == 0
+    if nrow(df_unif) == 0 && nrow(df_tp) == 0
         println("⚠️ No data found to process. Exiting analysis.")
         return
     end
 
-    df_all = vcat(df_slp, df_tp, cols=:union)
+    df_all = vcat(df_unif, df_tp, cols=:union)
 
     # --------------------------------------------------------------------------
     # PART A: TOURNAMENT PROFILES (From Version 1)
@@ -74,7 +74,7 @@ function run_statistical_analysis(results_dir::String)
     df_valid = df_all[.!invalid_mask, :]
 
     all_variants = unique(df_valid.Variant)
-    slp_variants = filter(v -> startswith(v, "SLP") || v == "BASE_SLP", all_variants)
+    unif_variants = filter(v -> startswith(v, "SLP") || v == "BASE_SLP", all_variants)
     tp_variants  = filter(v -> startswith(v, "2P") || v == "BASE_2P", all_variants)
 
     # SCENARIO TABLES
@@ -104,8 +104,8 @@ function run_statistical_analysis(results_dir::String)
 
     # INTRA-METHOD COMPARISON (Base vs Variants)
     intra_pairs = []
-    if "BASE_SLP" in slp_variants
-        for v in slp_variants
+    if "BASE_SLP" in unif_variants
+        for v in unif_variants
             if v != "BASE_SLP" push!(intra_pairs, ("BASE_SLP", v)) end
         end
     end
@@ -144,22 +144,22 @@ function run_statistical_analysis(results_dir::String)
 
     for prob in unique(df_valid.Problem)
         df_prob = filter(r -> r.Problem == prob, df_valid)
-        slps_valid = filter(r -> r.Variant in slp_variants && r.h_norm <= eps, df_prob)
+        unifs_valid = filter(r -> r.Variant in unif_variants && r.h_norm <= eps, df_prob)
         tps_valid  = filter(r -> r.Variant in tp_variants && r.h_norm <= eps, df_prob)
         
-        if nrow(slps_valid) > 0 && nrow(tps_valid) > 0
-            best_slp = sort(slps_valid, [:f_final, :Iterations])[1, :]
+        if nrow(unifs_valid) > 0 && nrow(tps_valid) > 0
+            best_unif = sort(unifs_valid, [:f_final, :Iterations])[1, :]
             best_2p = sort(tps_valid, [:f_final, :Iterations])[1, :]
             total_inter += 1
             
-            res_m1 = evaluate_m1(best_2p.Iterations, best_slp.Iterations, best_2p.f_final, best_slp.f_final, best_2p.h_norm, best_slp.h_norm, eps)
+            res_m1 = evaluate_m1(best_2p.Iterations, best_unif.Iterations, best_2p.f_final, best_unif.f_final, best_2p.h_norm, best_unif.h_norm, eps)
             res_m1 == :Win ? m1_w += 1 : (res_m1 == :Tie ? m1_t += 1 : m1_l += 1)
-            res_m2 = evaluate_m2(best_2p.f_final, best_slp.f_final, best_2p.h_norm, best_slp.h_norm, eps)
+            res_m2 = evaluate_m2(best_2p.f_final, best_unif.f_final, best_2p.h_norm, best_unif.h_norm, eps)
             res_m2 == :Win ? m2_w += 1 : (res_m2 == :Tie ? m2_t += 1 : m2_l += 1)
-            res_m3 = evaluate_m3(best_2p.Time_ms, best_slp.Time_ms, best_2p.f_final, best_slp.f_final, best_2p.h_norm, best_slp.h_norm, eps)
+            res_m3 = evaluate_m3(best_2p.Time_ms, best_unif.Time_ms, best_2p.f_final, best_unif.f_final, best_2p.h_norm, best_unif.h_norm, eps)
             res_m3 == :Win ? m3_w += 1 : (res_m3 == :Tie ? m3_t += 1 : m3_l += 1)
 
-            push!(inter_details, (Problem = prob, Best_UNIF = best_slp.Variant, UNIF_f_final = best_slp.f_final, UNIF_Iterations = best_slp.Iterations, Best_2P = best_2p.Variant, f_final_2P = best_2p.f_final, Iterations_2P = best_2p.Iterations, Result_M1_Iters = string(res_m1), Result_M2_F_Final = string(res_m2), Result_M3_Time = string(res_m3)))
+            push!(inter_details, (Problem = prob, Best_UNIF = best_unif.Variant, UNIF_f_final = best_unif.f_final, UNIF_Iterations = best_unif.Iterations, Best_2P = best_2p.Variant, f_final_2P = best_2p.f_final, Iterations_2P = best_2p.Iterations, Result_M1_Iters = string(res_m1), Result_M2_F_Final = string(res_m2), Result_M3_Time = string(res_m3)))
         end
     end
 
@@ -232,61 +232,61 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
     mkpath(plots_dir)
 
     # ---------------------------------------------------------
-    # GROUP 1: SLP - The Impact of APR and BQ
+    # GROUP 1: SLP - The Impact of SAR and PH
     # ---------------------------------------------------------
     g1 = get_existing([
-        "BASE_SLP",             # APR1, BQ0
-        "SLP_APR0_BQ0_ATR0",    # APR0, BQ0
-        "SLP_APR1_BQ1_ATR0",    # APR1, BQ1
-        "SLP_APR0_BQ1_ATR0"     # APR0, BQ1
+        "BASE_SLP",             # SAR1, PH0
+        "SLP_SAR0_PH0_ATR0",    # SAR0, PH0
+        "SLP_SAR1_PH1_ATR0",    # SAR1, PH1
+        "SLP_SAR0_PH1_ATR0"     # SAR0, PH1
     ])
     # GROUP 1
-    plot_profile(df, g1, :Time_ms, "Group 1: UNIF - APR vs BQ (Time)", joinpath(plots_dir, "Profile_G1_UNIF_APR_BQ_Time.png"))
+    plot_profile(df, g1, :Time_ms, "Group 1: UNIF - SAR vs PH (Time)", joinpath(plots_dir, "Profile_G1_UNIF_SAR_PH_Time.png"))
 
     # ---------------------------------------------------------
     # GROUP 2: SLP - The Impact of Anisotropy (ATR)
     # ---------------------------------------------------------
     g2 = get_existing([
-        "SLP_APR1_BQ1_ATR0",
-        "SLP_APR1_BQ1_ATR1",
-        "SLP_APR0_BQ1_ATR0",
-        "SLP_APR0_BQ1_ATR1"
+        "SLP_SAR1_PH1_ATR0",
+        "SLP_SAR1_PH1_ATR1",
+        "SLP_SAR0_PH1_ATR0",
+        "SLP_SAR0_PH1_ATR1"
     ])
     # GROUP 2
     plot_profile(df, g2, :Time_ms, "Group 2: UNIF - Anisotropy (Time)", joinpath(plots_dir, "Profile_G2_UNIF_ATR_Time.png"))
     
     # ---------------------------------------------------------
-    # GROUP 3: Two-Phase - Ratio Strategies (APR & URU)
+    # GROUP 3: Two-Phase - Ratio Strategies (SAR & RRU)
     # ---------------------------------------------------------
     g3 = get_existing([
-        "BASE_2P",               # APR1, URU0 (Base teórica: usa Ared/Pred, sem URU)
-        "2P_APR0_BQ0_ATR0_URU0", # APR0, URU0
-        "2P_APR1_BQ0_ATR0_URU1", # APR1, URU1
-        "2P_APR0_BQ0_ATR0_URU1"  # APR0, URU1
+        "BASE_2P",               # SAR1, RRU0 (Base teórica: usa Ared/Pred, sem RRU)
+        "2P_SAR0_PH0_ATR0_RRU0", # SAR0, RRU0
+        "2P_SAR1_PH0_ATR0_RRU1", # SAR1, RRU1
+        "2P_SAR0_PH0_ATR0_RRU1"  # SAR0, RRU1
     ])
     plot_profile(df, g3, :Time_ms, "Group 3: 2P - Ratio Strategies (Time)", joinpath(plots_dir, "Profile_G3_2P_Ratio_Time.png"))
     
     # ---------------------------------------------------------
-    # GROUP 4: Two-Phase - Step Shapes (BQ & ATR)
+    # GROUP 4: Two-Phase - Step Shapes (PH & ATR)
     # ---------------------------------------------------------
     g4 = get_existing([
-        "2P_APR1_BQ0_ATR0_URU1",
-        "2P_APR1_BQ1_ATR0_URU1",
-        "2P_APR1_BQ1_ATR1_URU1"
+        "2P_SAR1_PH0_ATR0_RRU1",
+        "2P_SAR1_PH1_ATR0_RRU1",
+        "2P_SAR1_PH1_ATR1_RRU1"
     ])
     plot_profile(df, g4, :Time_ms, "Group 4: 2P - Step Shapes (Time)", joinpath(plots_dir, "Profile_G4_2P_Shapes_Time.png"))
 
     # ---------------------------------------------------------
     # GROUP 5: SLP SQP Hessian Battle
     # ---------------------------------------------------------
-    slp_pure = filter(v -> occursin("SLP", v) && !occursin("SQP", v), all_variants)
-    best_slp = get_best_in_class(slp_pure, summary)
+    unif_pure = filter(v -> occursin("SLP", v) && !occursin("SQP", v), all_variants)
+    best_unif = get_best_in_class(unif_pure, summary)
 
-    if !isnothing(best_slp)
+    if !isnothing(best_unif)
         g5 = get_existing([
-            best_slp,
-            "$(best_slp)_SQP_IDENTITY",
-            "$(best_slp)_SQP_SPECTRAL"
+            best_unif,
+            "$(best_unif)_SQP_IDENTITY",
+            "$(best_unif)_SQP_SPECTRAL"
         ])
         # GROUP 5
         plot_profile(df, g5, :Time_ms, "Group 5: UNIF SQP Strategies (Time)", joinpath(plots_dir, "Profile_G5_UNIF_SQP_Time.png"))
@@ -310,15 +310,15 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
     # ---------------------------------------------------------
     # GROUP 7: THE GRAND FINALE
     # ---------------------------------------------------------
-    slp_sqp  = filter(v -> occursin("SLP", v) && occursin("SQP", v), all_variants)
+    unif_sqp  = filter(v -> occursin("SLP", v) && occursin("SQP", v), all_variants)
     tp_sqp   = filter(v -> occursin("2P", v) && occursin("SQP", v), all_variants)
 
-    best_slp_sqp  = get_best_in_class(slp_sqp, summary)
+    best_unif_sqp  = get_best_in_class(unif_sqp, summary)
     best_tp_sqp   = get_best_in_class(tp_sqp, summary)
 
     g7 = String[]
-    isnothing(best_slp)      || push!(g7, best_slp)
-    isnothing(best_slp_sqp)  || push!(g7, best_slp_sqp)
+    isnothing(best_unif)      || push!(g7, best_unif)
+    isnothing(best_unif_sqp)  || push!(g7, best_unif_sqp)
     isnothing(best_tp)       || push!(g7, best_tp)
     isnothing(best_tp_sqp)   || push!(g7, best_tp_sqp)
 
@@ -392,7 +392,7 @@ function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol
         push!(x_vals, plot_max)
         push!(y_vals, n_solved / n_probs)
 
-        clean_label = replace(s, "SLP_" => "UNIF ", "2P_" => "2P ","BASE_SLP" => "UNIF APR1_BQ0_ATR0", "BASE_2P" => "2P APR1_BQ0_ATR0_URU0")
+        clean_label = replace(s, "SLP_" => "UNIF ", "2P_" => "2P ","BASE_SLP" => "UNIF SAR1_PH0_ATR0", "BASE_2P" => "2P SAR1_PH0_ATR0_RRU0")
 
         plot!(p, x_vals, y_vals, linetype=:steppost, label=clean_label, linewidth=2.5)
     end

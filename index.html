@@ -27,14 +27,14 @@
 
             const processDataAndFilters = (rows) => {
                 const uniqueVariants = [...new Set(rows.map(r => r.Variant))].filter(Boolean);
-                const newFilters = { alg: {}, apr: {}, bq: {}, atr: {}, uru: {}, sqp: {} };
+                const newFilters = { alg: {}, sar: {}, ph: {}, atr: {}, rru: {}, sqp: {} };
 
                 uniqueVariants.forEach(v => {
                     const alg = v.includes('2P') ? '2P' : 'UNIF';
-                    const apr = (v.includes('APR1') || v.includes('BASE')) ? '1' : '0';
-                    const bq = v.includes('BQ1') ? '1' : '0';
+                    const sar = (v.includes('SAR1') || v.includes('BASE')) ? '1' : '0';
+                    const ph = v.includes('PH1') ? '1' : '0';
                     const atr = v.includes('ATR1') ? '1' : '0';
-                    const uru = v.includes('2P') ? (v.includes('URU1') ? '1' : '0') : 'N/A';
+                    const rru = v.includes('2P') ? (v.includes('RRU1') ? '1' : '0') : 'N/A';
                     
                     let sqp = 'NONE';
                     if (v.includes('IDENTITY')) sqp = 'IDENTITY';
@@ -42,10 +42,10 @@
                     if (v.includes('EXACT')) sqp = 'EXACT';
 
                     newFilters.alg[alg] = true;
-                    newFilters.apr[apr] = true;
-                    newFilters.bq[bq] = true;
+                    newFilters.sar[sar] = true;
+                    newFilters.ph[ph] = true;
                     newFilters.atr[atr] = true;
-                    newFilters.uru[uru] = true;
+                    newFilters.rru[rru] = true;
                     newFilters.sqp[sqp] = true;
                 });
 
@@ -123,18 +123,18 @@
 
                 const activeVariants = allVariants.filter(v => {
                     const alg = v.includes('2P') ? '2P' : 'UNIF';
-                    const apr = (v.includes('APR1') || v.includes('BASE')) ? '1' : '0';
-                    const bq = v.includes('BQ1') ? '1' : '0';
+                    const sar = (v.includes('SAR1') || v.includes('BASE')) ? '1' : '0';
+                    const ph = v.includes('PH1') ? '1' : '0';
                     const atr = v.includes('ATR1') ? '1' : '0';
-                    const uru = v.includes('2P') ? (v.includes('URU1') ? '1' : '0') : 'N/A';
+                    const rru = v.includes('2P') ? (v.includes('RRU1') ? '1' : '0') : 'N/A';
                     
                     let sqp = 'NONE';
                     if (v.includes('IDENTITY')) sqp = 'IDENTITY';
                     if (v.includes('SPECTRAL')) sqp = 'SPECTRAL';
                     if (v.includes('EXACT')) sqp = 'EXACT';
 
-                    return filters.alg[alg] && filters.apr[apr] && filters.bq[bq] && 
-                           filters.atr[atr] && filters.uru[uru] && filters.sqp[sqp];
+                    return filters.alg[alg] && filters.sar[sar] && filters.ph[ph] && 
+                           filters.atr[atr] && filters.rru[rru] && filters.sqp[sqp];
                 });
 
                 if (activeVariants.length === 0 || problems.length === 0) return null;
@@ -276,10 +276,10 @@
                         {Object.keys(filters).length > 0 && (
                             <div className="flex-1">
                                 <CheckboxGroup title="Algorithm" category="alg" />
-                                <CheckboxGroup title="Ared/Pred Ratio (APR)" category="apr" />
-                                <CheckboxGroup title="Parabolic Step (BQ)" category="bq" />
+                                <CheckboxGroup title="Ared/Pred Ratio (SAR)" category="sar" />
+                                <CheckboxGroup title="Parabolic Step (PH)" category="ph" />
                                 <CheckboxGroup title="Anisotropic Region (ATR)" category="atr" />
-                                <CheckboxGroup title="2P Ratio Update (URU)" category="uru" />
+                                <CheckboxGroup title="2P Ratio Update (RRU)" category="rru" />
                                 <CheckboxGroup title="SQP Hessian Strategy" category="sqp" />
                             </div>
                         )}

@@ -1,6 +1,6 @@
 module SharedTypes
 
-export StepLog, StepLog_SLP, StepLog_TwoPhase, OptimizationProblem, OptimizedBuffers, TwoPhaseParams, SLPParams, create_rosenbrock_problem0, create_rosenbrock_problem1, build_optimization_problem, GRB_ENV
+export StepLog, StepLog_UNIF, StepLog_TwoPhase, OptimizationProblem, OptimizedBuffers, TwoPhaseParams, UNIFParams, create_rosenbrock_problem0, create_rosenbrock_problem1, build_optimization_problem, GRB_ENV
 
 using ADNLPModels, NLPModels, Gurobi
 
@@ -17,17 +17,17 @@ Abstract base type for step iteration logs.
 abstract type AbstractStepLog end
 
 """
-Logging structure specific to the SLP (Sequential Linear Programming) algorithm.
+Logging structure specific to the SLP (Sequential Linear Programming) UNIF algorithm.
 Records the states and metrics for a single optimization step.
 """
-Base.@kwdef struct StepLog_SLP <: AbstractStepLog
+Base.@kwdef struct StepLog_UNIF <: AbstractStepLog
     iter::Int
     x_from::Vector{Float64}
     x_to::Vector{Float64}
     status::Symbol
     phase::Symbol
     delta::Union{Float64, Vector{Float64}}
-    # SLP-specific metrics
+    # UNIF-specific metrics
     ared::Float64 = 0.0
     pred::Float64 = 0.0
 end
@@ -140,10 +140,10 @@ Base.@kwdef mutable struct TwoPhaseParams
     non_monotone_M::Int = 5         # History length for non-monotone acceptance criteria
 
     # Trust Region Update Strategies
-    aredpred_ratio::Bool = true
-    backtracking_quadratic::Bool = true
+    strong_agreement_rule::Bool = true # flag to enable/disable ared/pred ratio-based trust region expansion
+    parabolic_heuristic::Bool = true
     anisotropic_trust_region::Bool = true
-    use_ratio_update::Bool = true
+    restoration_ratio_update::Bool = true
     ratio_safeguard_tol::Float64 = 1e-12
     ratio_max_factor::Float64 = 2.0
     ratio_min_factor::Float64 = 0.1
@@ -158,12 +158,12 @@ Base.@kwdef mutable struct TwoPhaseParams
     σ::Float64 = 0.1                # Matrix regularization term (H + σI)
     B_update_strategy::Symbol = :identity # Strategy for Hessian approximation (:identity, :spectral, :exact)
 
-    # Standard SLP Stopping Criteria (KKT and step-based)
+    # Standard UNIF Stopping Criteria (KKT and step-based)
     maxcount::Int = 3
     tolG::Float64 = 1e-3
     tolF::Float64 = 5e-2
     tolS::Float64 = 1e-4
-    use_slp_stopping::Bool = true
+    use_unif_stopping::Bool = true
     
     # Verbosity and Debugging Options
     verbose_in::Bool = false
@@ -176,9 +176,9 @@ Base.@kwdef mutable struct TwoPhaseParams
 end
 
 """
-Configuration parameters specifically for the standard SLP (Sequential Linear Programming) algorithm.
+Configuration parameters specifically for the standard UNIF (Unified Iterative Framework) algorithm.
 """
-Base.@kwdef mutable struct SLPParams
+Base.@kwdef mutable struct UNIFParams
     maxiter::Int = 500              # Maximum total iterations
     tolG::Float64 = 1e-3            # Tolerance for projected gradient
     tolF::Float64 = 5e-2            # Tolerance for objective function decrease
@@ -196,8 +196,8 @@ Base.@kwdef mutable struct SLPParams
     debugverbose::Bool = false
     output_flag::Int = 0            # Controls Gurobi's internal solver output (0 = silent)
 
-    # Backtracking and Anisotropy Settings
-    backtracking_quadratic::Bool = true
+    # parabolic heuristic and Anisotropy Settings
+    parabolic_heuristic::Bool = true
     anisotropic_trust_region::Bool = true
     parabolic_min_reduction_ratio::Float64 = 0.1
     parabolic_max_reduction_ratio::Float64 = 0.5
@@ -210,7 +210,7 @@ Base.@kwdef mutable struct SLPParams
     ratio_safeguard_tol::Float64 = 1e-8
     τ1::Float64 = 0.25              # Severe reduction multiplier
     τ2::Float64 = 0.5               # Moderate reduction multiplier
-    aredpred_ratio::Bool = true
+    strong_agreement_rule::Bool = true
 
     # Sequential Quadratic Programming (SQP) Configuration
     use_quadratic::Bool = false
@@ -218,7 +218,7 @@ Base.@kwdef mutable struct SLPParams
     σ::Float64 = 0.1                  # Matrix regularization term (H + σI)
     B_update_strategy::Symbol = :identity 
     
-    verbose_out::Bool = false       # Specific verbosity flag for backtracking operations
+    verbose_out::Bool = false       # Specific verbosity flag for operations
 end
 
 # ==============================================================================
