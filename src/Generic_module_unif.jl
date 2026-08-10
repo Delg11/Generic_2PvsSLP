@@ -4,7 +4,7 @@ export solve_unif_trust_region
 
 using NLPModels, Printf, JuMP, Gurobi, LinearAlgebra, RipQP,SparseArrays, QuadraticModels
 using ..SharedTypes
-
+include("Generic_module_ComputeB.jl")
 """
 Log message helper
 """
@@ -147,37 +147,6 @@ function parabolic_heuristic_step!(
     return δ_new
 end
 
-function compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{Float64}, σ_fallback::Float64, problem::OptimizationProblem, x_new::Vector{Float64}, λ::Vector{Float64})
-    if strategy == :exact
-        # Use the exact Hessian of the Lagrangian at the current point
-        B_exact = problem.∇²L(x_new, λ)
-        return B_exact
-    end
-    if strategy == :identity
-        return σ_fallback * spdiagm(0 => ones(n))
-        
-    elseif strategy == :spectral
-        if norm(s) < 1e-8 || norm(y_grad) < 1e-8
-            return σ_fallback * spdiagm(0 => ones(n))
-        end
-
-        sTy = dot(s, y_grad)
-        yTy = dot(y_grad, y_grad)
-
-        if sTy <= 1e-12
-            return σ_fallback * spdiagm(0 => ones(n))
-        end
-
-        alpha = yTy / sTy
-        alpha = clamp(alpha, 1e-4, 1e4)
-
-        return alpha * spdiagm(0 => ones(n))
-        
-    else
-        error("Estratégia desconhecida para cálculo de B: $strategy")
-    end
-end
-
 # ==============================================================================
 # MAIN UNIF SOLVER (Logic adapted from StrUNIF.jl)
 # ==============================================================================
@@ -249,17 +218,21 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
         return x, lambda, theta, 0, 0, x_accepted, full_log
     end
     # ==========================================================================
-    # MAIN LOOP (Condição idêntica ao MATLAB)
+    # MAIN LOOP
     # ==========================================================================
+
+    s_last_accepted = zeros(n) # Isola o vetor de passo correto
+    B = spdiagm(0 => ones(n))  # Declaração inicial no escopo superior
+
     while ((countG < params_unif.maxcount || countF < params_unif.maxcount) && (countS < params_unif.maxcount) && (iter < params_unif.maxiter))
 
         params_unif.debugverbose && println("\n🔍 [DEBUG-UNIF] === Iteration $(iter+1) started ===")
         params_unif.debugverbose && println("🔍 [DEBUG-UNIF] Current State: F(x) = $F, aredfsb = $feas_violation, delta = $delta")
 
         if params_unif.use_quadratic
-            if norm(s_sol) > 1e-12
+            if norm(s_last_accepted) > 1e-12 # Usa apenas o passo validado
                 y_diff = grad .- grad_old
-                B = compute_B(params_unif.B_update_strategy, n, s_sol, y_diff, params_unif.σ, prob, x,lambda)
+                B = Generic_module_ComputeB.compute_B(params_unif.B_update_strategy, n, s_last_accepted, y_diff, params_unif.σ, prob, x, lambda, B)
             else
                 B = params_unif.σ * spdiagm(0 => ones(n))
             end
@@ -387,7 +360,7 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
         h_trial = prob.h(x_trial)
 
 
-        # # Correção: Norma L1 para restrições de igualdade (abs em vez de max)
+        # Norma L1 para restrições de igualdade (abs)
         vio_curr = m > 0 ? sum(abs.(h_val)) : 0.0
         vio_trial = m > 0 ? sum(abs.(h_trial)) : 0.0
 
@@ -482,7 +455,8 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
             h_val = h_trial
             jac = prob.∇h(x)
             thetaMax = 1.0
-
+            # Atualiza o cache do passo para a equação secante da próxima iteração
+            s_last_accepted = copy(s_sol)
             # Trust Region Update
             delta_old = copy(delta)
 
@@ -490,14 +464,14 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
                 if params_unif.strong_agreement_rule
                     # Lógica tradicional baseada na razão de redução
                     if ared >= params_unif.rho * pred
-                        delta = min.(params_unif.alphaA * delta, 1.0)
+                        delta = min.(params_unif.alphaA * delta, params_unif.δmax)
                         params_unif.debugverbose && println("📈 [DEBUG-UNIF] Great step! Trust Region expanded: $delta_old -> $delta (ρ >= $(params_unif.rho))")
                     else
                         params_unif.debugverbose && println("🔄 [DEBUG-UNIF] Good step, but not great. Trust Region kept at: $delta (ρ < $(params_unif.rho))")
                     end
                 else
                     # Expansão incondicional (Ablação do SAR ativada)
-                    delta = min.(params_unif.alphaA * delta, 1.0)
+                    delta = min.(params_unif.alphaA * delta, params_unif.δmax)
                     params_unif.debugverbose && println("📈 [DEBUG-UNIF] Trust Region unconditionally expanded: $delta_old -> $delta")
                 end
             else

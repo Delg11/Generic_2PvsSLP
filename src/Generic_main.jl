@@ -6,9 +6,9 @@
 using Pkg
 
 # Activate the environment associated with the directory where this file is saved
-Pkg.activate(@__DIR__) 
+# Pkg.activate(@__DIR__) 
 # Read Manifest.toml and install/precompile all necessary dependencies
-Pkg.instantiate()
+# Pkg.instantiate()
 
 # Make sure ArgParse is added to your environment
 # Pkg.add("ArgParse")
@@ -298,34 +298,34 @@ function get_status_string(status_code::Int)
     else return "UNKNOWN_$(status_code)" end
 end
 
-println("\n🔥 EXECUTING WARM-UP (JIT Precompilation of ALL variants)...")
-try
-    # Using a pure-Julia custom problem to avoid CUTEst DLL locks and Fortran memory overhead
-    nlp_w = SharedTypes.create_rosenbrock_problem1()
-    prob_w = SharedTypes.build_optimization_problem(nlp_w)
-    x0_w = clamp.(nlp_w.meta.x0, prob_w.xl, prob_w.xu)
+# println("\n🔥 EXECUTING WARM-UP (JIT Precompilation of ALL variants)...")
+# try
+#     # Using a pure-Julia custom problem to avoid CUTEst DLL locks and Fortran memory overhead
+#     nlp_w = SharedTypes.create_rosenbrock_problem1()
+#     prob_w = SharedTypes.build_optimization_problem(nlp_w)
+#     x0_w = clamp.(nlp_w.meta.x0, prob_w.xl, prob_w.xu)
 
-    if RUN_TWOPHASE && length(twophase_variants) > 0
-        print("  Compiling Two-Phase variants... ")
-        for var in twophase_variants
-            # Run once to force compilation of all code paths (SQP, RipQP, Gurobi, etc.)
-            Generic_module_Twophase.two_phase_optimization(prob_w, x0_w, var.params; history=false)
-        end
-        println("OK")
-    end
+#     if RUN_TWOPHASE && length(twophase_variants) > 0
+#         print("  Compiling Two-Phase variants... ")
+#         for var in twophase_variants
+#             # Run once to force compilation of all code paths (SQP, RipQP, Gurobi, etc.)
+#             Generic_module_Twophase.two_phase_optimization(prob_w, x0_w, var.params; history=false)
+#         end
+#         println("OK")
+#     end
 
-    if RUN_UNIF && length(unif_variants) > 0
-        print("  Compiling UNIF variants... ")
-        for var in unif_variants
-            Generic_module_unif.solve_unif_trust_region(prob_w, x0_w, var.params)
-        end
-        println("OK")
-    end
+#     if RUN_UNIF && length(unif_variants) > 0
+#         print("  Compiling UNIF variants... ")
+#         for var in unif_variants
+#             Generic_module_unif.solve_unif_trust_region(prob_w, x0_w, var.params)
+#         end
+#         println("OK")
+#     end
     
-    println("🧹 Warm-up complete. Pure Julia problem used (No DLL locks).")
-catch e
-    println("⚠️  Warning: Warm-up failed ($e). The first recorded times may be inflated.")
-end
+#     println("🧹 Warm-up complete. Pure Julia problem used (No DLL locks).")
+# catch e
+#     println("⚠️  Warning: Warm-up failed ($e). The first recorded times may be inflated.")
+# end
 # ==============================================================================
 # 5.2 MAIN LOOP
 # ==============================================================================
@@ -375,6 +375,155 @@ function main()
     end
 end
 
-main()
+# main()
 # Run the statistics module
-Generic_module_Stats.run_statistical_analysis(results_dir)
+# Generic_module_Stats.run_statistical_analysis(results_dir)
+
+# # nlp_w = SharedTypes.create_rosenbrock_problem1()
+# nlp_w = CUTEstModel{Float64}("ROSENBR")
+# prob_w = SharedTypes.build_optimization_problem(nlp_w)
+# x0_w = clamp.(nlp_w.meta.x0, prob_w.xl, prob_w.xu)
+# # Cria os parâmetros com sar=true, M=1, ph=false, atr=false, rru=false, use_quad=true, b_strat=:identity
+# custom_params = build_twophase_params(true, 1, false, false, false, false, :reciprocal)
+
+# # Executa a otimização
+# @time y, λ, θ, iter, status, hist, log = Generic_module_Twophase.two_phase_optimization(prob_w, x0_w, custom_params; history=false)
+
+
+using NLPModelsIpopt
+# ==============================================================================
+# 1. SETUP DO PROBLEMA E VARIÁVEIS COMUNS
+# ==============================================================================
+nlp_w = CUTEstModel{Float64}("ROSENBR")
+# nlp_w = SharedTypes.create_rosenbrock_problem1()
+prob_w = SharedTypes.build_optimization_problem(nlp_w)
+x0_w = clamp.(nlp_w.meta.x0, prob_w.xl, prob_w.xu)
+
+common_max_iter = 500
+common_delta0   = 0.1
+common_tolG     = 1e-3
+common_tolF     = 5e-2
+common_tolS     = 1e-4
+common_maxcount = 3
+common_verbose  = true
+
+# Executa o Ipopt com fornecimento de Hessiana exata (equivalente ao SQP-EXACT)
+tempo_ipopt = @elapsed begin
+    stats_ipopt = ipopt(nlp_w, print_level=0)
+end
+
+println("IPOPT EXACT | Tempo: ", round(tempo_ipopt, digits=5), 
+        " | Iter: ", stats_ipopt.iter, 
+        " | f(y): ", round(stats_ipopt.objective, digits=8))
+tempo_ipopt_bfgs = @elapsed begin
+stats_ipopt_bfgs = ipopt(nlp_w, print_level=0, hessian_approximation="limited-memory")
+end
+println("IPOPT BFGS  | Tempo: ", round(tempo_ipopt_bfgs, digits=5), 
+        " | Iter: ", stats_ipopt_bfgs.iter, 
+        " | f(y): ", round(stats_ipopt_bfgs.objective, digits=8))
+# ==============================================================================
+# 2. DEFINIÇÃO DAS ESTRATÉGIAS
+# ==============================================================================
+strategies = [
+    # :none, 
+    # :exact, 
+    # :diag_exact,
+    # :identity, 
+    # :spectral, 
+    # :reciprocal, 
+    # :exponential, 
+    # :quasi_newton,
+    :bfgs
+]
+
+println("\n" * "="^120)
+println(" TESTANDO ESTRATÉGIAS: TWOPHASE vs UNIF (Rosenbrock)")
+println("="^120)
+println(
+    rpad("Estratégia", 18), " | ", 
+    rpad("TP (s)", 8), " | ", rpad("TP It", 5), " | ", rpad("TP f(y)", 12), " | ", rpad("TP y", 15), " | ",
+    rpad("UNIF (s)", 8), " | ", rpad("UNIF It", 7), " | ", rpad("UNIF f(y)", 12), " | ", rpad("UNIF y", 15)
+)
+println("-"^120)
+
+# ==============================================================================
+# 3. LOOP DE AVALIAÇÃO
+# ==============================================================================
+for strat in strategies
+    if strat == :none
+        use_quad = false
+        b_strat = :identity
+        nome_strat = "BASE (sem quad)"
+    else
+        use_quad = true
+        b_strat = strat
+        nome_strat = "SQP-$(uppercase(string(strat)))"
+    end
+
+    # ---------------------------------------------------------
+    # EXECUÇÃO TWOPHASE
+    # ---------------------------------------------------------
+    params_twophase = SharedTypes.TwoPhaseParams(
+        max_outer_iter = common_max_iter, δ0_opt = common_delta0, δ0_resto = common_delta0,
+        tolG = common_tolG, tolF = common_tolF, tolS = common_tolS, maxcount = common_maxcount,
+        verbose_out = true, use_unif_stopping = true, rfeas = 1e-12, δmin = 1e-6, 
+        δmax = 10.0, r_resto = 0.9, τ1 = 0.1, τ2 = 0.25, αL = 1e-6, αR = 1e-4,
+        θ0 = 0.90, max_iter_resto = 500, verbose_in = common_verbose, debugverbose = false,
+        strong_agreement_rule = false, non_monotone_M = 1, parabolic_heuristic = false, 
+        anisotropic_trust_region = false, restoration_ratio_update = false,
+        use_quadratic = use_quad, B_update_strategy = b_strat, quadratic_solver = :gurobi
+    )
+    
+    tempo_tp = @elapsed begin
+        y_tp, _, _, iter_tp, _, _, _ = Generic_module_Twophase.two_phase_optimization(prob_w, x0_w, params_twophase; history=false)
+    end
+    f_val_tp = prob_w.f(y_tp)
+    y_tp_str = string(round.(y_tp, digits=2))
+
+    # ---------------------------------------------------------
+    # EXECUÇÃO UNIF (COM TRY/CATCH)
+    # ---------------------------------------------------------
+    params_unif = SharedTypes.UNIFParams(
+        delta0 = common_delta0, tolG = common_tolG, tolF = common_tolF, tolS = common_tolS,
+        maxiter = common_max_iter, maxcount = common_maxcount, verbose = common_verbose,
+        verbose_out = false, debugverbose = false, parabolic_heuristic = true, 
+        anisotropic_trust_region = false, strong_agreement_rule = true, 
+        use_quadratic = use_quad, B_update_strategy = b_strat, quadratic_solver = :gurobi
+    )
+
+    # Pré-alocação para lidar com falhas de implementação no UNIF
+    tempo_unif_str = "Erro"
+    f_val_unif_str = "---"
+    iter_unif_str = "---"
+    y_unif_str = "---"
+
+    # try
+        tempo_unif = @elapsed begin
+            y_unif, _, _, iter_unif, _, _, _ = Generic_module_unif.solve_unif_trust_region(prob_w, x0_w, params_unif)
+        end
+        f_val_unif = prob_w.f(y_unif)
+        
+        tempo_unif_str = string(round(tempo_unif, digits=5))
+        f_val_unif_str = string(round(f_val_unif, digits=8))
+        iter_unif_str = string(iter_unif)
+        y_unif_str = string(round.(y_unif, digits=2))
+    # catch e
+        # Continua silenciando falhas nas estratégias que o UNIF ainda não suporta
+    # end
+
+    # ---------------------------------------------------------
+    # LOG
+    # ---------------------------------------------------------
+    println(
+        rpad(nome_strat, 18), " | ", 
+        rpad(round(tempo_tp, digits=5), 8), " | ", 
+        rpad(iter_tp, 5), " | ",
+        rpad(round(f_val_tp, digits=8), 12), " | ", 
+        rpad(y_tp_str, 15), " | ",
+        rpad(tempo_unif_str, 8), " | ", 
+        rpad(iter_unif_str, 7), " | ",
+        rpad(f_val_unif_str, 12), " | ",
+        rpad(y_unif_str, 15)
+    )
+end
+println("="^120)

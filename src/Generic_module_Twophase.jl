@@ -2,9 +2,10 @@ module Generic_module_Twophase
 
 export create_optimized_model, restoration_phase, optimization_phase, two_phase_optimization
 
+
 using JuMP, Gurobi, Printf, LinearAlgebra, RipQP,SparseArrays, QuadraticModels
 using ..SharedTypes
-
+include("Generic_module_ComputeB.jl")
 # ==============================================================================
 # UTILITY FUNCTIONS
 # ==============================================================================
@@ -46,31 +47,31 @@ end
 #    • :identity  → B = σ_fallback * I
 #    • :spectral  → B = α I (pure spectral with safeguards)
 #    • :exact     → B = ∇²L(x, λ) (Exact Hessian of the Lagrangian)
-function compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{Float64}, σ_fallback::Float64, problem::OptimizationProblem, x_new::Vector{Float64}, λ::Vector{Float64})
-    if strategy == :exact
-        B_exact = problem.∇²L(x_new, λ)
-        return B_exact
+# function compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{Float64}, σ_fallback::Float64, problem::OptimizationProblem, x_new::Vector{Float64}, λ::Vector{Float64})
+#     if strategy == :exact
+#         B_exact = problem.∇²L(x_new, λ)
+#         return B_exact
         
-    elseif strategy == :identity
-        return σ_fallback * spdiagm(0 => ones(n))
+#     elseif strategy == :identity
+#         return σ_fallback * spdiagm(0 => ones(n))
         
-    elseif strategy == :spectral
-        if norm(s) < 1e-8 || norm(y_grad) < 1e-8
-            return σ_fallback * spdiagm(0 => ones(n))
-        end
-        sTy = dot(s, y_grad)
-        yTy = dot(y_grad, y_grad)
-        if sTy <= 1e-12
-            return σ_fallback * spdiagm(0 => ones(n))
-        end
-        alpha = yTy / sTy
-        alpha = clamp(alpha, 1e-4, 1e4)
-        return alpha * spdiagm(0 => ones(n))
+#     elseif strategy == :spectral
+#         if norm(s) < 1e-8 || norm(y_grad) < 1e-8
+#             return σ_fallback * spdiagm(0 => ones(n))
+#         end
+#         sTy = dot(s, y_grad)
+#         yTy = dot(y_grad, y_grad)
+#         if sTy <= 1e-12
+#             return σ_fallback * spdiagm(0 => ones(n))
+#         end
+#         alpha = yTy / sTy
+#         alpha = clamp(alpha, 1e-4, 1e4)
+#         return alpha * spdiagm(0 => ones(n))
         
-    else
-        error("Unknown B calculation strategy: $strategy")
-    end
-end
+#     else
+#         error("Unknown B calculation strategy: $strategy")
+#     end
+# end
 
 # ==============================================================================
 # JUMP MODEL CREATION
@@ -548,7 +549,6 @@ function optimization_phase(
     m = length(problem.h(y))
     θ = θ_k
     consecutive_rejects = 0
-    verbose && println("🎯 Starting optimization phase...")
 
     buffers.x_temp .= y
     F_y = problem.f(y)
@@ -560,24 +560,23 @@ function optimization_phase(
     h_xk = problem.h(x_k)
     params.debugverbose && println("🔍 [DEBUG-OPT] Initial state: F(y^k)=$F_y, ||h(y^k)||=$norm_h_y, δ=$δ")
     params.debugverbose && println("🔍 [DEBUG-OPT] History sizes - Lagrangian: $(length(lagrangian_history)), Merit: $(length(merit_history))")
+
+    buffers.∇f = problem.∇f(buffers.x_temp)
+    buffers.∇h = problem.∇h(buffers.x_temp)
     # Main optimization iteration loop
     while j < params.max_iter_opt
         params.debugverbose && println("\n🔍 [DEBUG-OPT] === Iteration j=$j started ===")
-
-        buffers.∇f = problem.∇f(buffers.x_temp)
-        buffers.∇h = problem.∇h(buffers.x_temp)
         # =========================================================
         # Step 2: Find z^{ℓ,j} by solving the subproblem
         # Step 3: Choose λ 
         # =========================================================
         success, f_model = solve_optimization_subproblem!(model_opt, n, δ, problem, buffers, params, B) # 
-        !params.use_quadratic && (buffers.λ .= 0.0)
-        
+        # !params.use_quadratic && (buffers.λ .= 0.0)
         if !success
             δ = max.(params.τ2 .* δ, params.δmin)
             j += 1
             params.debugverbose && println("🚫 [DEBUG-OPT] Subproblem failure! Could not find a valid step.")
-            verbose && println("🔄 Subproblem failure, reducing δ to $δ (j=$j)")
+            params.debugverbose && println("🔄 Subproblem failure, reducing δ to $δ (j=$j)")
             continue
         end
         # z^j = y^k + s
@@ -716,7 +715,7 @@ function optimization_phase(
             
             buffers.x_temp .= buffers.x_old 
             if params.use_unif_stopping && ((δ isa Vector) ? maximum(δ) : δ) <= params.δmin + 1e-9
-                verbose && println("⚠️ δ too small, aborting optimization")
+                params.debugverbose && println("⚠️ δ too small, aborting optimization")
                 return y, buffers.λ, θ, δ, false
             end
             δ_old = copy(δ)
@@ -724,18 +723,18 @@ function optimization_phase(
             j += 1
             
             params.debugverbose && println("🔍 [DEBUG-OPT] Merit failure. Shrinking δ from $δ_old to $δ")
-            verbose && println("🔄 Merit test failure, reducing δ to $δ (j=$j)")
+            params.debugverbose && println("🔄 Merit test failure, reducing δ to $δ (j=$j)")
             continue
         end
         # =========================================================
         # Step 7: Step Accepted! Update final state and δ for the next step
         # =========================================================
         params.debugverbose && println("✅ [DEBUG-OPT] ACCEPTED by Merit function! (Beat threshold by $(merit_threshold - Phi_zj_theta))")
-        verbose && println("✅ Step accepted in optimization (j=$j)")
+        params.debugverbose && println("✅ Step accepted in optimization (j=$j)")
         
 
         ∇f_new_accepted = problem.∇f(buffers.x_temp)
-        buffers.∇f_old .= ∇f_new_accepted
+        # buffers.∇f_old .= ∇f_new_accepted
         
         # Trust region expansion
         if !params.parabolic_heuristic
@@ -789,7 +788,7 @@ function two_phase_optimization(
 
     logio = nothing
     try
-        verbose && println("🚀 Starting two-phase optimization")
+        params.debugverbose && println("🚀 Starting two-phase optimization")
         if params.debugverbose
             println("DEBUG: === INITIALIZATION ===")
             println("DEBUG: Basic parameters:")
@@ -807,6 +806,7 @@ function two_phase_optimization(
         δr = params.anisotropic_trust_region ? fill(params.δ0_resto, n) : params.δ0_resto
         δo = params.anisotropic_trust_region ? fill(params.δ0_opt, n) : params.δ0_opt
         iter = 0
+        s_last_accepted = zeros(n)
         B   = params.use_quadratic ? spdiagm(0 => ones(n)) : nothing
 
         countG = 0
@@ -814,6 +814,7 @@ function two_phase_optimization(
         countS = 0
         # Create buffers
         buffers = OptimizedBuffers(n, m)
+        Lgrad_current = zeros(n)
         # History tracking
         x_hist = history ? Vector{Vector{Float64}}(undef, max_outer_iter + 1) : nothing
         if history
@@ -915,6 +916,16 @@ function two_phase_optimization(
             end
             x_old_outer = copy(x)
             norm_h_old = norm_h_current
+            Lgrad_current = problem.∇f(x) + problem.∇h(x)' * λ
+            if params.use_quadratic && iter > 0
+                if norm(s_last_accepted) > 1e-12
+                    # y_k usa a diferença do Lagrangiano em relação à iteração anterior
+                    y_diff = Lgrad_current .- buffers.Lgrad_old
+                    B = Generic_module_ComputeB.compute_B(params.B_update_strategy, n, s_last_accepted, y_diff, params.σ, problem, x, λ, B)
+                end
+                # O bloco "else" foi removido. Se o passo for nulo, B é mantido intacto.
+            end
+            buffers.Lgrad_old = copy(Lgrad_current)
             # ================================================================
             # Step 1: RESTORATION PHASE
             # ================================================================
@@ -935,14 +946,7 @@ function two_phase_optimization(
             # ================================================================
             # Step 2: OPTIMIZATION PHASE
             # ================================================================
-            if params.use_quadratic
-                if norm(buffers.s_val) > 1e-12
-                    y_diff = buffers.∇f .- buffers.∇f_old
-                    B = compute_B(params.B_update_strategy, n, buffers.s_val, y_diff, params.σ, problem, y,λ)
-                else
-                    B = params.σ * spdiagm(0 => ones(n))
-                end
-            end
+
             x_new, λ_new, θ_new, δo, success_opt = optimization_phase(
             problem, 
             x_old_outer,      
@@ -967,6 +971,7 @@ function two_phase_optimization(
             x .= x_new
             λ .= λ_new
             θ = θ_new
+            s_last_accepted .= x .- x_old_outer
             f_new = problem.f(x)
             h_new = problem.h(x)
             norm_h_new = norm(h_new)

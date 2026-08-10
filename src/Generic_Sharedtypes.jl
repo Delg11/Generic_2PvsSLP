@@ -90,6 +90,7 @@ mutable struct OptimizedBuffers
     z_temp::Vector{Float64}; z_old::Vector{Float64}
     h_old::Vector{Float64}; ∇h::Matrix{Float64}; λ::Vector{Float64}
     lvar::Vector{Float64}; uvar::Vector{Float64}
+    Lgrad_old::Vector{Float64}
 
     function OptimizedBuffers(n::Int, m::Int)
         new(zeros(n), zeros(n), zeros(n), 0.0, 0.0, zeros(n), zeros(n), 
@@ -302,6 +303,7 @@ function build_optimization_problem(nlp::AbstractNLPModel)
     project(x) = clamp.(x, xl, xu)
     prox_grad_c(x) = project(x - ∇c(x)) - x
     Lagrangian(x, λ) = f(x) + dot(h(x), λ)
+    
     merit(x, λ, θ) = θ * Lagrangian(x, λ) + (1 - θ) * norm(h(x))
 
     # Incorporate the objective weight modifier directly into the Lagrangian Hessian evaluation
