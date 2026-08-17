@@ -177,7 +177,7 @@ Base.@kwdef mutable struct TwoPhaseParams
     gpnorm_div_nelem::Bool = true
     norm_gpnorm::Union{Int, Float64} = Inf
     gpnorm_strategy::Symbol = :dykstra
-    gpnorm_debug::Bool = true
+    gpnorm_debug::Bool = false
     gpnorm_max_iter::Int = 500
     gpnorm_tol::Float64 = 1e-8
 
