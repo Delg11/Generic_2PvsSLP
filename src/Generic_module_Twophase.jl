@@ -42,6 +42,145 @@ end
     return θ * (F + dot(h, λ)) + (1 - θ) * norm(h)
 end
 
+function compute_gradient_projection(
+    x::Vector{Float64},
+    Fgrad::Vector{Float64},
+    jac_h::AbstractMatrix{Float64},
+    λ::Vector{Float64},
+    xl::Vector{Float64},
+    xu::Vector{Float64};
+    norm_type::Union{Float64, Int} = Inf,
+    strategy::Symbol=:dykstra,
+    max_iter::Int=500,
+    tol::Float64=1e-8,
+    debug::Bool=false
+)
+    n = length(x)
+    m = size(jac_h, 1)
+    
+    run_lagrangian = (strategy == :lagrangian) || debug
+    run_qp         = (strategy == :qp)         || debug
+    run_dykstra    = (strategy == :dykstra)    || debug
+
+    buf_lag = run_lagrangian ? zeros(n) : Float64[]
+    buf_qp  = run_qp         ? zeros(n) : Float64[]
+    buf_dyk = run_dykstra    ? zeros(n) : Float64[]
+    qp_succeeded = true
+
+    # 1. Método: Lagrangiano (dependente de lambda)
+    if run_lagrangian
+        if m > 0
+            Lgrad = Fgrad .+ jac_h' * λ
+        else
+            Lgrad = Fgrad
+        end
+        for i in 1:n
+            buf_lag[i] = clamp(x[i] - Lgrad[i], xl[i], xu[i]) - x[i]
+        end
+    end
+
+    if run_qp || run_dykstra
+        v = x .- Fgrad
+        b_target = m > 0 ? jac_h * x : Float64[]
+
+        function execute_dykstra!(out_buffer)
+            p_dyk = copy(v)
+            q = zeros(n)
+            r = zeros(n)
+            y_val = zeros(n)
+            
+            local fact_J
+            if m > 0
+                J_Jt = jac_h * jac_h'
+                fact_J = lu(J_Jt + 1e-12 * I)
+            end
+            
+            for k in 1:max_iter
+                p_old = copy(p_dyk)
+                
+                # Projeção 1: Limites da caixa (Box)
+                for i in 1:n
+                    val = p_dyk[i] + q[i]
+                    y_val[i] = clamp(val, xl[i], xu[i])
+                    q[i] = val - y_val[i]
+                end
+                
+                # Projeção 2: Hiperplanos
+                if m > 0
+                    y_plus_r = y_val .+ r
+                    res = jac_h * y_plus_r .- b_target
+                    lambda_proj = fact_J \ res
+                    
+                    p_dyk .= y_plus_r .- jac_h' * lambda_proj
+                    r .= y_plus_r .- p_dyk
+                else
+                    p_dyk .= y_val
+                end
+                
+                max_diff = norm(p_dyk .- p_old, Inf)
+                if max_diff < tol
+                    break
+                end
+            end
+            
+            for i in 1:n
+                out_buffer[i] = p_dyk[i] - x[i]
+            end
+        end
+
+        # 2. Método: QP via JuMP
+        if run_qp
+            model = Model(Gurobi.Optimizer)
+            set_silent(model)
+            @variable(model, xl[i] <= p_var[i=1:n] <= xu[i])
+            @objective(model, Min, 0.5 * sum((p_var[i] - v[i])^2 for i in 1:n))
+            
+            if m > 0
+                @constraint(model, jac_h * p_var .== b_target)
+            end
+            
+            optimize!(model)
+            status = termination_status(model)
+            if status == MOI.OPTIMAL || status == MOI.LOCALLY_SOLVED
+                p_opt = value.(p_var)
+                for i in 1:n
+                    buf_qp[i] = p_opt[i] - x[i]
+                end
+            else
+                qp_succeeded = false
+                execute_dykstra!(buf_qp) # Fallback
+            end
+        end
+
+        # 3. Método: Dykstra Nativo
+        if run_dykstra
+            execute_dykstra!(buf_dyk)
+        end
+    end
+
+    if debug
+        n_lag = norm(buf_lag, norm_type)
+        n_qp  = run_qp ? norm(buf_qp, norm_type) : 0.0
+        n_dyk = run_dykstra ? norm(buf_dyk, norm_type) : 0.0
+        
+        println("--- DEBUG: Gradient Projection Comparison ---")
+        @printf("Lagrangian norm : %.8e\n", n_lag)
+        @printf("QP norm         : %.8e%s\n", n_qp, qp_succeeded ? "" : " (FALLBACK: Dykstra usado)")
+        @printf("Dykstra norm    : %.8e\n", n_dyk)
+        println("---------------------------------------------")
+    end
+        
+    if strategy == :lagrangian
+        return buf_lag
+    elseif strategy == :qp
+        return buf_qp
+    elseif strategy == :dykstra
+        return buf_dyk
+    else
+        error("Estratégia inválida: $strategy")
+    end
+end
+
 # Calculates the diagonal matrix B_k for the quadratic subproblem.
 # Supported strategies:
 #    • :identity  → B = σ_fallback * I
@@ -446,10 +585,21 @@ function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::Union{Flo
     m = length(buffers.h_old)
     grad_L = buffers.∇f + transpose(buffers.∇h) * buffers.λ
     
-    # Define quadratic matrix
+    # # Define quadratic matrix
     local Hqp
     params.use_quadratic && (Hqp = B)
-
+    # if params.use_quadratic
+    #     # Verifica o menor autovalor
+    #     eig_min = minimum(eigvals(Matrix(B)))
+        
+    #     if eig_min < 1e-8
+    #         # Adiciona um shift para tornar a matriz estritamente positiva
+    #         shift = abs(eig_min) + 1e-4
+    #         Hqp = B + (shift * I)
+    #     else
+    #         Hqp = B
+    #     end
+    # end
     # Helper: get trust region radius for dimension i
     get_δ(i) = (δ isa Vector) ? δ[i] : δ
 
@@ -507,13 +657,18 @@ function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::Union{Flo
     end
 
     optimize!(model)
-
     if termination_status(model) == MOI.OPTIMAL
         @inbounds for i in 1:n
             buffers.s_val[i] = value(s[i])
         end
-        for i in 1:m
-            buffers.λ[i] = dual(con[i])
+        if has_duals(model)
+            @inbounds for i in 1:m
+                buffers.λ[i] = dual(con[i])
+            end
+        else
+            @inbounds for i in 1:m
+                buffers.λ[i] = 0.0
+            end
         end
         return true, objective_value(model)
     end
@@ -806,7 +961,8 @@ function two_phase_optimization(
         δr = params.anisotropic_trust_region ? fill(params.δ0_resto, n) : params.δ0_resto
         δo = params.anisotropic_trust_region ? fill(params.δ0_opt, n) : params.δ0_opt
         iter = 0
-        s_last_accepted = zeros(n)
+        s_opt_outer = zeros(n)
+        y_opt_outer = zeros(n)
         B   = params.use_quadratic ? spdiagm(0 => ones(n)) : nothing
 
         countG = 0
@@ -840,6 +996,17 @@ function two_phase_optimization(
         jac_h = problem.∇h(x)
         Lgrad = buffers.∇f_old + jac_h' * λ
         gradpbox = clamp.(x .- Lgrad, problem.xl, problem.xu) .- x
+
+        jac_h = problem.∇h(x)
+        
+        gradpbox = compute_gradient_projection(
+            x, buffers.∇f_old, jac_h, λ, problem.xl, problem.xu;
+            norm_type = params.norm_gpnorm,
+            strategy = params.gpnorm_strategy,
+            max_iter = params.gpnorm_max_iter,
+            tol = params.gpnorm_tol,
+            debug = params.gpnorm_debug
+        )
         
         gpnorm = norm(gradpbox, params.norm_gpnorm)
         if params.gpnorm_div_nelem
@@ -916,14 +1083,10 @@ function two_phase_optimization(
             end
             x_old_outer = copy(x)
             norm_h_old = norm_h_current
-            Lgrad_current = problem.∇f(x) + problem.∇h(x)' * λ
             if params.use_quadratic && iter > 0
-                if norm(s_last_accepted) > 1e-12
-                    # y_k usa a diferença do Lagrangiano em relação à iteração anterior
-                    y_diff = Lgrad_current .- buffers.Lgrad_old
-                    B = Generic_module_ComputeB.compute_B(params.B_update_strategy, n, s_last_accepted, y_diff, params.σ, problem, x, λ, B)
+                if norm(s_opt_outer) > 1e-12
+                    B = Generic_module_ComputeB.compute_B(params.B_update_strategy, n, s_opt_outer, y_opt_outer, params.σ, problem, x, λ, B)
                 end
-                # O bloco "else" foi removido. Se o passo for nulo, B é mantido intacto.
             end
             buffers.Lgrad_old = copy(Lgrad_current)
             # ================================================================
@@ -971,17 +1134,43 @@ function two_phase_optimization(
             x .= x_new
             λ .= λ_new
             θ = θ_new
-            s_last_accepted .= x .- x_old_outer
+            
             f_new = problem.f(x)
             h_new = problem.h(x)
             norm_h_new = norm(h_new)
             Δx = norm(x - x_old_outer, Inf)
             ΔF = abs(f_new - f_current)
-            # --- Recalculate GP Norm (AGP) ---
+            
+            # --- Recalculate Gradients at new point ---
             grad_f_new = problem.∇f(x)
             jac_h_new = problem.∇h(x)
             Lgrad = grad_f_new + jac_h_new' * λ
-            gradpbox = clamp.(x .- Lgrad, problem.xl, problem.xu) .- x
+
+            # ================================================================
+            # Captura do par secante (s, y) PURO da fase de otimização
+            # ================================================================
+            if success_opt && norm(buffers.s_val) > 1e-12
+                s_opt_outer .= buffers.s_val
+                
+                # Lagrangiano no ponto inicial da otimização (y)
+                # buffers.∇f e buffers.∇h contêm os gradientes em y calculados em optimization_phase
+                Lgrad_y = buffers.∇f + buffers.∇h' * λ
+                
+                y_opt_outer .= Lgrad .- Lgrad_y
+            else
+                # Passo de otimização nulo/rejeitado: preserva a curvatura já acumulada.
+                s_opt_outer .= 0.0
+            end
+
+            # --- Recalculate GP Norm (AGP) ---
+            gradpbox = compute_gradient_projection(
+                x, grad_f_new, jac_h_new, λ, problem.xl, problem.xu;
+                norm_type = params.norm_gpnorm,
+                strategy = params.gpnorm_strategy,
+                max_iter = params.gpnorm_max_iter,
+                tol = params.gpnorm_tol,
+                debug = params.gpnorm_debug
+            )
             gpnorm = norm(gradpbox, params.norm_gpnorm)
             params.debugverbose && println("DEBUG: GPnorm recalculated: $gpnorm")
             if params.gpnorm_div_nelem

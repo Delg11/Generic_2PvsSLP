@@ -170,10 +170,18 @@ Base.@kwdef mutable struct TwoPhaseParams
     verbose_in::Bool = false
     verbose_out::Bool = true
     scale::Bool = false
-    norm_gpnorm::Union{Int, Float64} = 2
-    gpnorm_div_nelem::Bool = true
     debugverbose::Bool = false
     log_to_file::Bool = false
+
+    # GpNorm
+    gpnorm_div_nelem::Bool = true
+    norm_gpnorm::Union{Int, Float64} = 2
+    gpnorm_strategy::Symbol = :dyskstra
+    gpnorm_debug::Bool = true
+    gpnorm_max_iter::Int = 500
+    gpnorm_tol::Float64 = 1e-8
+
+
 end
 
 """

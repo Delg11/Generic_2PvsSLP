@@ -302,8 +302,14 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
             if termination_status(model) == MOI.OPTIMAL
                 s_sol = value.(s)
                 lp_obj_val = objective_value(model)
-                if m > 0
-                    lambda = dual.(lp_cons)
+                if has_duals(model)
+                    if m > 0
+                        lambda = dual.(lp_cons)
+                    end
+                else
+                    if m > 0
+                        lambda = zeros(m)
+                    end
                 end
                 success_opt = true
                 mode_str = params_unif.use_quadratic ? "SQP" : "UNIF"
