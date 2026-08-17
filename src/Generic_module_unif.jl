@@ -147,6 +147,145 @@ function parabolic_heuristic_step!(
     return δ_new
 end
 
+function compute_gradient_projection(
+    x::Vector{Float64},
+    Fgrad::Vector{Float64},
+    jac_h::AbstractMatrix{Float64},
+    λ::Vector{Float64},
+    xl::Vector{Float64},
+    xu::Vector{Float64};
+    norm_type::Union{Float64, Int} = Inf,
+    strategy::Symbol=:dykstra,
+    max_iter::Int=500,
+    tol::Float64=1e-8,
+    debug::Bool=false
+)
+    n = length(x)
+    m = size(jac_h, 1)
+    
+    run_lagrangian = (strategy == :lagrangian) || debug
+    run_qp         = (strategy == :qp)         || debug
+    run_dykstra    = (strategy == :dykstra)    || debug
+
+    buf_lag = run_lagrangian ? zeros(n) : Float64[]
+    buf_qp  = run_qp         ? zeros(n) : Float64[]
+    buf_dyk = run_dykstra    ? zeros(n) : Float64[]
+    qp_succeeded = true
+
+    # 1. Método: Lagrangiano (dependente de lambda)
+    if run_lagrangian
+        if m > 0
+            Lgrad = Fgrad .+ jac_h' * λ
+        else
+            Lgrad = Fgrad
+        end
+        for i in 1:n
+            buf_lag[i] = clamp(x[i] - Lgrad[i], xl[i], xu[i]) - x[i]
+        end
+    end
+
+    if run_qp || run_dykstra
+        v = x .- Fgrad
+        b_target = m > 0 ? jac_h * x : Float64[]
+
+        function execute_dykstra!(out_buffer)
+            p_dyk = copy(v)
+            q = zeros(n)
+            r = zeros(n)
+            y_val = zeros(n)
+            
+            local fact_J
+            if m > 0
+                J_Jt = jac_h * jac_h'
+                fact_J = lu(J_Jt + 1e-12 * I)
+            end
+            
+            for k in 1:max_iter
+                p_old = copy(p_dyk)
+                
+                # Projeção 1: Limites da caixa (Box)
+                for i in 1:n
+                    val = p_dyk[i] + q[i]
+                    y_val[i] = clamp(val, xl[i], xu[i])
+                    q[i] = val - y_val[i]
+                end
+                
+                # Projeção 2: Hiperplanos
+                if m > 0
+                    y_plus_r = y_val .+ r
+                    res = jac_h * y_plus_r .- b_target
+                    lambda_proj = fact_J \ res
+                    
+                    p_dyk .= y_plus_r .- jac_h' * lambda_proj
+                    r .= y_plus_r .- p_dyk
+                else
+                    p_dyk .= y_val
+                end
+                
+                max_diff = norm(p_dyk .- p_old, Inf)
+                if max_diff < tol
+                    break
+                end
+            end
+            
+            for i in 1:n
+                out_buffer[i] = p_dyk[i] - x[i]
+            end
+        end
+
+        # 2. Método: QP via JuMP
+        if run_qp
+            model = Model(Gurobi.Optimizer)
+            set_silent(model)
+            @variable(model, xl[i] <= p_var[i=1:n] <= xu[i])
+            @objective(model, Min, 0.5 * sum((p_var[i] - v[i])^2 for i in 1:n))
+            
+            if m > 0
+                @constraint(model, jac_h * p_var .== b_target)
+            end
+            
+            optimize!(model)
+            status = termination_status(model)
+            if status == MOI.OPTIMAL || status == MOI.LOCALLY_SOLVED
+                p_opt = value.(p_var)
+                for i in 1:n
+                    buf_qp[i] = p_opt[i] - x[i]
+                end
+            else
+                qp_succeeded = false
+                execute_dykstra!(buf_qp) # Fallback
+            end
+        end
+
+        # 3. Método: Dykstra Nativo
+        if run_dykstra
+            execute_dykstra!(buf_dyk)
+        end
+    end
+
+    if debug
+        n_lag = norm(buf_lag, norm_type)
+        n_qp  = run_qp ? norm(buf_qp, norm_type) : 0.0
+        n_dyk = run_dykstra ? norm(buf_dyk, norm_type) : 0.0
+        
+        println("--- DEBUG: Gradient Projection Comparison ---")
+        @printf("Lagrangian norm : %.8e\n", n_lag)
+        @printf("QP norm         : %.8e%s\n", n_qp, qp_succeeded ? "" : " (FALLBACK: Dykstra usado)")
+        @printf("Dykstra norm    : %.8e\n", n_dyk)
+        println("---------------------------------------------")
+    end
+        
+    if strategy == :lagrangian
+        return buf_lag
+    elseif strategy == :qp
+        return buf_qp
+    elseif strategy == :dykstra
+        return buf_dyk
+    else
+        error("Estratégia inválida: $strategy")
+    end
+end
+
 # ==============================================================================
 # MAIN UNIF SOLVER (Logic adapted from StrUNIF.jl)
 # ==============================================================================
@@ -201,8 +340,15 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
     # ==========================================================================
     # Gradiente Projetado (para limites de caixa)
     # Lógica: x - proj(x - grad)
-    proj_dir = clamp.(x .- grad, prob.xl, prob.xu)
-    gpnorm = norm(proj_dir .- x, Inf)
+    proj_step = compute_gradient_projection(
+        x, grad, jac, lambda, prob.xl, prob.xu;
+        norm_type = params_unif.norm_gpnorm,
+        strategy = params_unif.gpnorm_strategy,
+        max_iter = params_unif.gpnorm_max_iter,
+        tol = params_unif.gpnorm_tol,
+        debug = params_unif.gpnorm_debug
+    )
+    gpnorm = norm(proj_step, params_unif.norm_gpnorm)
 
     # Viabilidade
     feas_violation = (m > 0) ? maximum(max.(0.0, h_val)) : 0.0
@@ -533,14 +679,26 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
         # -------------------------------------------------
         # 4. Cálculo de Métricas de Parada
         # -------------------------------------------------
-        # Gradiente Lagrangeano Projetado
-        Lgrad = copy(grad)
-        if m > 0 && !iszero(lambda)
-            Lgrad .+= jac' * lambda
-        end
+        # # Gradiente Lagrangeano Projetado
+        # Lgrad = copy(grad)
+        # if m > 0 && !iszero(lambda)
+        #     Lgrad .+= jac' * lambda
+        # end
 
-        proj_dir_k = clamp.(x .- Lgrad, prob.xl, prob.xu)
-        gpnorm = norm(proj_dir_k .- x, Inf)
+        # proj_dir_k = clamp.(x .- Lgrad, prob.xl, prob.xu)
+        # gpnorm = norm(proj_dir_k .- x, Inf)
+        # -------------------------------------------------
+        # 4. Cálculo de Métricas de Parada
+        # -------------------------------------------------
+        proj_step_k = compute_gradient_projection(
+            x, grad, jac, lambda, prob.xl, prob.xu;
+            norm_type = params_unif.norm_gpnorm,
+            strategy = params_unif.gpnorm_strategy,
+            max_iter = params_unif.gpnorm_max_iter,
+            tol = params_unif.gpnorm_tol,
+            debug = params_unif.gpnorm_debug
+        )
+        gpnorm = norm(proj_step_k, params_unif.norm_gpnorm)
 
         # Atualização dos Contadores (igual ao MATLAB)
         if gpnorm <= params_unif.tolG

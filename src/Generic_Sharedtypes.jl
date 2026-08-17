@@ -135,7 +135,7 @@ Base.@kwdef mutable struct TwoPhaseParams
     # Iteration Limits and Stagnation Controls
     max_iter_resto::Int = 50        # Maximum iterations within a single restoration phase
     max_iter_opt::Int = 50          # Maximum iterations within a single optimization phase
-    max_outer_iter::Int = 250       # Maximum overall algorithm iterations
+    max_outer_iter::Int = 500       # Maximum overall algorithm iterations
     stag_tol::Float64 = 1e-5        # Step size threshold to trigger stagnation counter
     max_stag::Int = 3               # Maximum consecutive stagnated iterations allowed
     non_monotone_M::Int = 5         # History length for non-monotone acceptance criteria
@@ -155,7 +155,7 @@ Base.@kwdef mutable struct TwoPhaseParams
 
     # Sequential Quadratic Programming (SQP) Configuration
     use_quadratic::Bool = false     # Flag to enable/disable quadratic model usage
-    quadratic_solver::Symbol = :ripqp # Selected solver for QP subproblems
+    quadratic_solver::Symbol = :gurobi # Selected solver for QP subproblems
     σ::Float64 = 0.1                # Matrix regularization term (H + σI)
     B_update_strategy::Symbol = :identity # Strategy for Hessian approximation (:identity, :spectral, :exact)
 
@@ -175,8 +175,8 @@ Base.@kwdef mutable struct TwoPhaseParams
 
     # GpNorm
     gpnorm_div_nelem::Bool = true
-    norm_gpnorm::Union{Int, Float64} = 2
-    gpnorm_strategy::Symbol = :dyskstra
+    norm_gpnorm::Union{Int, Float64} = Inf
+    gpnorm_strategy::Symbol = :dykstra
     gpnorm_debug::Bool = true
     gpnorm_max_iter::Int = 500
     gpnorm_tol::Float64 = 1e-8
@@ -223,11 +223,20 @@ Base.@kwdef mutable struct UNIFParams
 
     # Sequential Quadratic Programming (SQP) Configuration
     use_quadratic::Bool = false
-    quadratic_solver::Symbol = :ripqp
+    quadratic_solver::Symbol = :gurobi
     σ::Float64 = 0.1                  # Matrix regularization term (H + σI)
     B_update_strategy::Symbol = :identity 
     
     verbose_out::Bool = false       # Specific verbosity flag for operations
+
+
+    # GpNorm
+    # gpnorm_div_nelem::Bool = true
+    norm_gpnorm::Union{Int, Float64} = Inf
+    gpnorm_strategy::Symbol = :dykstra
+    gpnorm_debug::Bool = false
+    gpnorm_max_iter::Int = 500
+    gpnorm_tol::Float64 = 1e-8
 end
 
 # ==============================================================================
