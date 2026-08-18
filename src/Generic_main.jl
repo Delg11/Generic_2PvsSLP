@@ -299,34 +299,34 @@ function get_status_string(status_code::Int)
     else return "UNKNOWN_$(status_code)" end
 end
 
-# println("\n🔥 EXECUTING WARM-UP (JIT Precompilation of ALL variants)...")
-# try
-#     # Using a pure-Julia custom problem to avoid CUTEst DLL locks and Fortran memory overhead
-#     nlp_w = SharedTypes.create_rosenbrock_problem1()
-#     prob_w = SharedTypes.build_optimization_problem(nlp_w)
-#     x0_w = clamp.(nlp_w.meta.x0, prob_w.xl, prob_w.xu)
+println("\n🔥 EXECUTING WARM-UP (JIT Precompilation of ALL variants)...")
+try
+    # Using a pure-Julia custom problem to avoid CUTEst DLL locks and Fortran memory overhead
+    nlp_w = SharedTypes.create_rosenbrock_problem1()
+    prob_w = SharedTypes.build_optimization_problem(nlp_w)
+    x0_w = clamp.(nlp_w.meta.x0, prob_w.xl, prob_w.xu)
 
-#     if RUN_TWOPHASE && length(twophase_variants) > 0
-#         print("  Compiling Two-Phase variants... ")
-#         for var in twophase_variants
-#             # Run once to force compilation of all code paths (SQP, RipQP, Gurobi, etc.)
-#             Generic_module_Twophase.two_phase_optimization(prob_w, x0_w, var.params; history=false)
-#         end
-#         println("OK")
-#     end
+    if RUN_TWOPHASE && length(twophase_variants) > 0
+        print("  Compiling Two-Phase variants... ")
+        for var in twophase_variants
+            # Run once to force compilation of all code paths (SQP, RipQP, Gurobi, etc.)
+            Generic_module_Twophase.two_phase_optimization(prob_w, x0_w, var.params; history=false)
+        end
+        println("OK")
+    end
 
-#     if RUN_UNIF && length(unif_variants) > 0
-#         print("  Compiling UNIF variants... ")
-#         for var in unif_variants
-#             Generic_module_unif.solve_unif_trust_region(prob_w, x0_w, var.params)
-#         end
-#         println("OK")
-#     end
+    if RUN_UNIF && length(unif_variants) > 0
+        print("  Compiling UNIF variants... ")
+        for var in unif_variants
+            Generic_module_unif.solve_unif_trust_region(prob_w, x0_w, var.params)
+        end
+        println("OK")
+    end
     
-#     println("🧹 Warm-up complete. Pure Julia problem used (No DLL locks).")
-# catch e
-#     println("⚠️  Warning: Warm-up failed ($e). The first recorded times may be inflated.")
-# end
+    println("🧹 Warm-up complete. Pure Julia problem used (No DLL locks).")
+catch e
+    println("⚠️  Warning: Warm-up failed ($e). The first recorded times may be inflated.")
+end
 # ==============================================================================
 # 5.2 MAIN LOOP
 # ==============================================================================
