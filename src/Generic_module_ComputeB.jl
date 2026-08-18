@@ -35,26 +35,30 @@ function compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{
         alpha = clamp(alpha, 1e-4, 1e4)
         return alpha * spdiagm(0 => ones(n))
         
-    elseif strategy == :reciprocal
-        # Obtém o gradiente do Lagrangiano (ou da obj) no ponto corrente
-        # Nota: Assume-se que problem possui o método ∇L(x, λ). 
-        # Caso use apenas ∇f, altere para problem.∇f(x_new)
+elseif strategy == :reciprocal
         grad = ∇L(x_new, λ)
         
         b = zeros(n)
         for i in 1:n
-            # Segunda derivada implícita da aproximação por variáveis recíprocas (Eq. 5.90)
-            d2f_R = -2.0 / x_new[i] * grad[i]
+            # Proteção contra divisão por zero
+            if abs(x_new[i]) < 1e-10
+                d2f_R = 0.0 
+            else
+                d2f_R = -2.0 / x_new[i] * grad[i]
+            end
             
-            # Regra de salvaguarda de positividade para garantir convexidade (Eq. 5.91)
+            # Regra de salvaguarda de positividade (Eq. 5.91)
             if d2f_R >= 0.0
                 b[i] = d2f_R
             else
                 b[i] = d2f_R + 1.1 * abs(d2f_R)
             end
             
-            # Salvaguarda para evitar valores nulos ou negativos (matriz singular)
-            if b[i] < 1e-5
+            # Salvaguarda dupla: evita singularidade (limite inferior) e 
+            # evita valores infinitos ou excessivos para otimizadores quadráticos (limite superior)
+            if !isfinite(b[i]) || b[i] > 1e8
+                b[i] = 1e8
+            elseif b[i] < 1e-5
                 b[i] = 1e-5
             end
         end
