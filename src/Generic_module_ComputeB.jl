@@ -87,8 +87,12 @@ elseif strategy == :reciprocal
                 end
             end
             
-            # Segunda derivada da aproximação exponencial (Eq. 5.99)
-            d2f_E = (ai - 1.0) / x_curr * g_curr
+            # Segunda derivada da aproximação exponencial com proteção
+            if abs(x_curr) < 1e-10
+                d2f_E = 0.0
+            else
+                d2f_E = (ai - 1.0) / x_curr * g_curr
+            end
             
             # Regra de salvaguarda de positividade (Eq. 5.100)
             if d2f_E >= 0.0
@@ -97,7 +101,10 @@ elseif strategy == :reciprocal
                 b[i] = d2f_E + 1.1 * abs(d2f_E)
             end
             
-            if b[i] < 1e-5
+            # Salvaguarda dupla completa (inferior e superior)
+            if !isfinite(b[i]) || b[i] > 1e8
+                b[i] = 1e8
+            elseif b[i] < 1e-5
                 b[i] = 1e-5
             end
         end
@@ -112,9 +119,13 @@ elseif strategy == :reciprocal
             wi = y_grad[i]  # variação de gradiente y_i
             
             if abs(vi) < 1e-10
-                # Caso o passo seja nulo/muito pequeno ou seja a primeira iteração,
-                # inicializa-se com a aproximação recíproca clássica (pág. 116)
-                d2f_R = -2.0 / x_new[i] * grad[i]
+                # Fallback protegido contra divisão por zero
+                if abs(x_new[i]) < 1e-10
+                    d2f_R = 0.0
+                else
+                    d2f_R = -2.0 / x_new[i] * grad[i]
+                end
+                
                 b[i] = d2f_R >= 0.0 ? d2f_R : d2f_R + 1.1 * abs(d2f_R)
             else
                 # Equação secante diagonal clássica (Eq. 5.105)
@@ -128,8 +139,10 @@ elseif strategy == :reciprocal
                 end
             end
             
-            # Limite inferior estrito positivo delta (Eq. 5.101) para garantir convexidade
-            if b[i] < 1e-5
+            # Salvaguarda dupla completa
+            if !isfinite(b[i]) || b[i] > 1e8
+                b[i] = 1e8
+            elseif b[i] < 1e-5
                 b[i] = 1e-5
             end
         end
