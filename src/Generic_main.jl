@@ -139,7 +139,7 @@ println("-" ^ 80)
 const RUN_TWOPHASE = args["run-twophase"]
 const RUN_UNIF      = args["run-unif"]
 
-common_max_iter = 500
+common_max_iter = 5000
 common_delta0   = 0.1
 common_tolG     = 1e-3
 common_tolF     = 5e-2
@@ -378,7 +378,7 @@ end
 
 main()
 # Run the statistics module
-Generic_module_Stats.run_statistical_analysis(results_dir)
+# Generic_module_Stats.run_statistical_analysis(results_dir)
 
 # # nlp_w = SharedTypes.create_rosenbrock_problem1()
 # # nlp_w = CUTEstModel{Float64}("ROSENBR")
