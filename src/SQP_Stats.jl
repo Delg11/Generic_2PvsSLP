@@ -100,7 +100,7 @@ function run_statistical_analysis(results_dir::String)
 
     println("📈 Generating Dolan-Moré Performance Profiles...")
     generate_tournament_profiles(df_all, summary_df, results_dir)
-
+    plot_outcome_distribution(df_all, summary_df, results_dir)
     # --------------------------------------------------------------------------
     # PART B: METRICS AND XLSX EXPORT
     # --------------------------------------------------------------------------
@@ -109,7 +109,7 @@ function run_statistical_analysis(results_dir::String)
     # Filter invalid results (NaN or Inf) for the XLSX metrics
     invalid_mask = isnan.(df_all.f_final) .| isinf.(df_all.f_final) .| isnan.(df_all.h_norm) .| isinf.(df_all.h_norm)
     df_valid = df_all[.!invalid_mask, :]
-
+    plot_solution_quality_histogram(df_valid, summary_df, results_dir)
     all_variants  = unique(df_valid.Variant)
     unif_variants = filter(v -> startswith(v, "UNIF") || v == "BASE_UNIF", all_variants)
     tp_variants   = filter(v -> startswith(v, "2P")   || v == "BASE_2P", all_variants)
@@ -286,7 +286,7 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
     # ---------------------------------------------------------
     # GROUP 1: UNIF - Hessian Approximations
     # ---------------------------------------------------------
-    g1_base_unif = "UNIF_SAR0_PH1_ATR0_SQP_"
+    g1_base_unif = "UNIF_SAR1_PH0_ATR0_SQP_"
     g1 = get_existing([
         g1_base_unif * "IDENTITY",
         g1_base_unif * "SPECTRAL",
@@ -489,6 +489,164 @@ function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol
 
     savefig(p, filename)
     println("  > Saved: $(basename(filename))")
+end
+
+function plot_outcome_distribution(df::DataFrame, summary::DataFrame, out_dir::String)
+    println("📈 Generating Outcome Distribution (2P-QN vs UNIF-QN)...")
+    
+    all_variants = unique(df.Variant)
+    # Filtra exclusivamente as variantes Quasi-Newton
+    unif_qn = filter(v -> startswith(v, "UNIF") && occursin("QUASI_NEWTON", v), all_variants)
+    tp_qn   = filter(v -> startswith(v, "2P")   && occursin("QUASI_NEWTON", v), all_variants)
+    
+    best_unif_var = get_best_in_class(unif_qn, summary)
+    best_2p_var   = get_best_in_class(tp_qn, summary)
+
+    if isnothing(best_unif_var) || isnothing(best_2p_var)
+        println("⚠️ Not enough data to compare 2P-QN vs UNIF-QN.")
+        return
+    end
+
+    v_2p_absoluto = 0
+    v_2p_gap      = 0
+    empate        = 0
+    v_unif_gap    = 0
+    v_unif_absoluto = 0
+
+    function get_result(v_name, p_name)
+        rows = df[(df.Variant .== v_name) .& (df.Problem .== p_name), :]
+        if nrow(rows) > 0
+            st = rows[1, :Status]
+            f = rows[1, :f_final]
+            hn = rows[1, :h_norm]
+            is_ok = st == "KKT_OK" && hn <= 1e-3
+            return is_ok, f
+        end
+        return false, nothing
+    end
+
+    for p in unique(df.Problem)
+        ok_2p, f_2p     = get_result(best_2p_var, p)
+        ok_unif, f_unif = get_result(best_unif_var, p)
+
+        if ok_2p && !ok_unif
+            v_2p_absoluto += 1
+        elseif !ok_2p && ok_unif
+            v_unif_absoluto += 1
+        elseif ok_2p && ok_unif
+            gap = (f_2p - f_unif) / max(1e-8, abs(f_unif))
+            
+            if gap < -1e-3
+                v_2p_gap += 1
+            elseif gap > 1e-3
+                v_unif_gap += 1
+            else
+                empate += 1
+            end
+        end
+    end
+
+    # Atualizado para refletir QN
+    categories = [
+        "2P-QN Wins\n(UNIF Failed)", 
+        "2P-QN Wins\n(Better f)", 
+        "Tie\n(|Gap| <= 1e-3)", 
+        "UNIF-QN Wins\n(Better f)", 
+        "UNIF-QN Wins\n(2P Failed)"
+    ]
+    counts = [v_2p_absoluto, v_2p_gap, empate, v_unif_gap, v_unif_absoluto]
+    max_c = maximum(counts)
+    
+    colors = [colorant"#1A7A54", colorant"#4EA553", colorant"#999999", colorant"#009CE8", colorant"#295CA3"]
+
+    p = bar(categories, counts, 
+            color=colors, 
+            legend=false, 
+            title="Outcome Distribution: 2P-QN vs UNIF-QN",
+            ylabel="Number of Problems",
+            framestyle=:box,
+            ylims=(0, max_c * 1.15), # 15% de margem no topo para caber o texto
+            dpi=300,
+            size=(800, 500))
+    
+    for (i, c) in enumerate(counts)
+        annotate!(p, categories[i], c + (max_c * 0.015), text(string(c), 11, :center, :bottom))
+    end
+
+    savefig(p, joinpath(out_dir, "Plots", "Outcome_Distribution_2P_vs_UNIF_QN.png"))
+end
+
+function plot_solution_quality_histogram(df::DataFrame, summary::DataFrame, out_dir::String)
+    println("📈 Generating Solution Quality Histograms (Relative Gap - QN only)...")
+    
+    df_ok = filter(r -> r.Status == "KKT_OK" && r.h_norm <= 1e-3, df)
+    
+    all_variants = unique(df.Variant)
+    # Filtra exclusivamente as variantes Quasi-Newton
+    unif_qn = filter(v -> startswith(v, "UNIF") && occursin("QUASI_NEWTON", v), all_variants)
+    tp_qn   = filter(v -> startswith(v, "2P")   && occursin("QUASI_NEWTON", v), all_variants)
+    
+    best_unif_var = get_best_in_class(unif_qn, summary)
+    best_2p_var   = get_best_in_class(tp_qn, summary)
+    ipopt_var     = "IPOPT"
+
+    gaps_2p_ipopt = Float64[]
+    gaps_unif_ipopt = Float64[]
+    gaps_2p_unif = Float64[]
+
+    function get_f(v_name, p_name)
+        if isnothing(v_name) return nothing end
+        rows = df_ok[(df_ok.Variant .== v_name) .& (df_ok.Problem .== p_name), :]
+        return nrow(rows) > 0 ? rows[1, :f_final] : nothing
+    end
+
+    for p in unique(df_ok.Problem)
+        f_ipopt = get_f(ipopt_var, p)
+        f_2p    = get_f(best_2p_var, p)
+        f_unif  = get_f(best_unif_var, p)
+
+        if !isnothing(f_2p) && !isnothing(f_ipopt)
+            push!(gaps_2p_ipopt, (f_2p - f_ipopt) / max(1e-8, abs(f_ipopt)))
+        end
+
+        if !isnothing(f_unif) && !isnothing(f_ipopt)
+            push!(gaps_unif_ipopt, (f_unif - f_ipopt) / max(1e-8, abs(f_ipopt)))
+        end
+
+        if !isnothing(f_2p) && !isnothing(f_unif)
+            push!(gaps_2p_unif, (f_2p - f_unif) / max(1e-8, abs(f_unif)))
+        end
+    end
+
+    filter_gap(g) = filter(x -> abs(x) <= 0.1, g)
+
+    # Força os títulos para QN
+    n_2p = "2P-QN"
+    n_unif = "UNIF-QN"
+
+    if !isempty(gaps_2p_ipopt)
+        p1 = histogram(filter_gap(gaps_2p_ipopt), bins=50, normalize=:probability, 
+                       title="$n_2p vs IPOPT",
+                       xlabel="Gap < 0 ($n_2p wins) | Gap > 0 (IPOPT wins)", 
+                       ylabel="Frequency", color=colorant"#D8724C", legend=false)
+        savefig(p1, joinpath(out_dir, "Plots", "Hist_Gap_2P_vs_IPOPT_QN.png"))
+    end
+
+    if !isempty(gaps_unif_ipopt)
+        p2 = histogram(filter_gap(gaps_unif_ipopt), bins=50, normalize=:probability, 
+                       title="$n_unif vs IPOPT",
+                       xlabel="Gap < 0 ($n_unif wins) | Gap > 0 (IPOPT wins)", 
+                       ylabel="Frequency", color=colorant"#009CE8", legend=false)
+        savefig(p2, joinpath(out_dir, "Plots", "Hist_Gap_UNIF_vs_IPOPT_QN.png"))
+    end
+
+    if !isempty(gaps_2p_unif)
+        p3 = histogram(filter_gap(gaps_2p_unif), bins=50, normalize=:probability, 
+                       title="$n_2p vs $n_unif",
+                       xlabel="Gap < 0 ($n_2p wins) | Gap > 0 ($n_unif wins)", 
+                       ylabel="Frequency", color=colorant"#4EA553", legend=false)
+        savefig(p3, joinpath(out_dir, "Plots", "Hist_Gap_2P_vs_UNIF_QN.png"))
+    end
 end
 
 end # End of module
