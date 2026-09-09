@@ -633,7 +633,7 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
                     delta, Fold, F_trial, slope_val, params_unif, snorm, norm(s_sol)^2, :increase;
                     anisotropic=params_unif.anisotropic_trust_region, 
                     s_vec=s_sol, 
-                    grad=grad,                
+                    grad=grad_old,                
                     min_reduction_ratio=params_unif.parabolic_min_reduction_ratio,
                     max_reduction_ratio=params_unif.parabolic_max_reduction_ratio,
                     min_increase_ratio=params_unif.parabolic_min_increase_ratio,

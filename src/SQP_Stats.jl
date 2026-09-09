@@ -421,6 +421,75 @@ Builds a Dolan-Moré performance profile (step plot) for a specific metric and s
 mesma variante mantenha sempre a mesma cor em todos os gráficos gerados. Se
 omitido, cai de volta no ciclo automático de cores do Plots.jl.
 """
+# function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol, title_str::String, filename::String, color_map::AbstractDict=Dict{String,Any}())
+#     if length(solvers) < 2
+#         println("  > Skipping '$title_str': Not enough valid solvers in this group.")
+#         return
+#     end
+
+#     problems = unique(df.Problem)
+#     n_probs = length(problems)
+#     n_solvers = length(solvers)
+
+#     perf_matrix = fill(Inf, n_probs, n_solvers)
+
+#     for (j, s) in enumerate(solvers)
+#         for (i, p) in enumerate(problems)
+#             row = df[(df.Variant .== s) .& (df.Problem .== p), :]
+#             if nrow(row) > 0 && row[1, :Status] == "KKT_OK"
+#                 val = Float64(row[1, metric_col])
+#                 perf_matrix[i, j] = val <= 0.0 ? 1e-8 : val
+#             end
+#         end
+#     end
+
+#     min_vals = minimum(perf_matrix, dims=2)
+#     ratios = perf_matrix ./ min_vals
+#     ratios[isnan.(ratios)] .= Inf
+
+#     valid_ratios = filter(x -> !isinf(x), ratios)
+#     max_tau = isempty(valid_ratios) ? 10.0 : maximum(valid_ratios)
+#     plot_max = max(10.0, max_tau * 1.1)
+
+#     p = plot(title=title_str, 
+#              xlabel="Performance Ratio (τ)", 
+#              ylabel="Fraction of Solved Problems", 
+#              legend=:bottomright, 
+#              xscale=:log10, 
+#              framestyle=:box,
+#              dpi=300,
+#              size=(800, 600))
+
+#     for (j, s) in enumerate(solvers)
+#         sorted_r = sort(ratios[:, j])
+#         filter!(x -> !isinf(x), sorted_r)
+        
+#         n_solved = length(sorted_r)
+        
+#         x_vals = [1.0]
+#         y_vals = [0.0]
+        
+#         for (k, r) in enumerate(sorted_r)
+#             push!(x_vals, r)
+#             push!(y_vals, k / n_probs)
+#         end
+        
+#         push!(x_vals, plot_max)
+#         push!(y_vals, n_solved / n_probs)
+
+#         clean_label = replace(s, "UNIF_" => "UNIF ", "2P_" => "2P ", "BASE_UNIF" => "UNIF SAR1_PH0_ATR0", "BASE_2P" => "2P SAR1_PH0_ATR0_RRU0")
+
+#         line_color = get(color_map, s, nothing)
+#         if line_color === nothing
+#             plot!(p, x_vals, y_vals, linetype=:steppost, label=clean_label, linewidth=2.5)
+#         else
+#             plot!(p, x_vals, y_vals, linetype=:steppost, label=clean_label, linewidth=2.5, color=line_color)
+#         end
+#     end
+
+#     savefig(p, filename)
+#     println("  > Saved: $(basename(filename))")
+# end
 function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol, title_str::String, filename::String, color_map::AbstractDict=Dict{String,Any}())
     if length(solvers) < 2
         println("  > Skipping '$title_str': Not enough valid solvers in this group.")
@@ -433,12 +502,45 @@ function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol
 
     perf_matrix = fill(Inf, n_probs, n_solvers)
 
-    for (j, s) in enumerate(solvers)
-        for (i, p) in enumerate(problems)
-            row = df[(df.Variant .== s) .& (df.Problem .== p), :]
-            if nrow(row) > 0 && row[1, :Status] == "KKT_OK"
-                val = Float64(row[1, metric_col])
-                perf_matrix[i, j] = val <= 0.0 ? 1e-8 : val
+    infeasible_statuses = ["INFEASIBLE_STATIONARY", "STALLED_INFEASIBLE"]
+    f_tol = 1e-5 # Tolerância numérica para considerar empate na função objetivo
+    h_tol = 1e-5 # Tolerância máxima de violação para atestar viabilidade
+
+    for (i, p) in enumerate(problems)
+        df_p = df[df.Problem .== p, :]
+        
+        # Etapa 1: Encontrar a melhor função objetivo (F_min) entre os solvers viáveis
+        best_f = Inf
+        for s in solvers
+            row = df_p[df_p.Variant .== s, :]
+            if nrow(row) > 0
+                status = row[1, :Status]
+                h_val = Float64(row[1, :h_norm])
+                
+                if !(status in infeasible_statuses) && h_val <= h_tol
+                    f_val = Float64(row[1, :f_final])
+                    best_f = min(best_f, f_val)
+                end
+            end
+        end
+
+        isinf(best_f) && continue
+
+        # Etapa 2: Preencher a matriz de performance para os que atingiram F_min
+        for (j, s) in enumerate(solvers)
+            row = df_p[df_p.Variant .== s, :]
+            if nrow(row) > 0
+                status = row[1, :Status]
+                h_val = Float64(row[1, :h_norm])
+                
+                if !(status in infeasible_statuses) && h_val <= h_tol
+                    f_val = Float64(row[1, :f_final])
+                    
+                    if f_val <= best_f + f_tol + f_tol * abs(best_f)
+                        val = Float64(row[1, metric_col])
+                        perf_matrix[i, j] = val <= 0.0 ? 1e-8 : val
+                    end
+                end
             end
         end
     end
