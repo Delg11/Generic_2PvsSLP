@@ -312,7 +312,7 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
     # ---------------------------------------------------------
     # GROUP 3: UNIF - Geometry Impact (Fixing best Hessian)
     # ---------------------------------------------------------
-    best_unif_hessian_full = get_best_in_class(g1, summary)
+    best_unif_hessian_full = get_best_in_class(g1, df)
     if !isnothing(best_unif_hessian_full)
         best_hessian_unif = replace(best_unif_hessian_full, g1_base_unif => "")
         g3 = get_existing([
@@ -327,7 +327,7 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
     # ---------------------------------------------------------
     # GROUP 4: 2P - Geometry Impact (Fixing best Hessian)
     # ---------------------------------------------------------
-    best_2p_hessian_full = get_best_in_class(g2, summary)
+    best_2p_hessian_full = get_best_in_class(g2, df)
     if !isnothing(best_2p_hessian_full)
         best_hessian_2p = replace(best_2p_hessian_full, g2_base_2p => "")
         g4 = get_existing([
@@ -345,8 +345,8 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
     unif_sqp = filter(v -> occursin("UNIF", v) && occursin("SQP", v), all_variants)
     tp_sqp   = filter(v -> occursin("2P", v)   && occursin("SQP", v), all_variants)
 
-    best_unif_sqp = get_best_in_class(unif_sqp, summary)
-    best_tp_sqp   = get_best_in_class(tp_sqp, summary)
+    best_unif_sqp = get_best_in_class(unif_sqp, df)
+    best_tp_sqp   = get_best_in_class(tp_sqp, df)
 
     g5 = String[]
     isnothing(best_unif_sqp) || push!(g5, best_unif_sqp)
@@ -407,11 +407,62 @@ function build_variant_color_map(variants::Vector{String})
     return Dict(sorted_variants[i] => colors[i] for i in 1:n)
 end
 
-function get_best_in_class(class_variants::Vector{String}, summary::DataFrame)
+function get_best_in_class_old(class_variants::Vector{String}, summary::DataFrame)
     if isempty(class_variants) return nothing end
     sub = summary[in.(summary.Variant, Ref(class_variants)), :]
     if nrow(sub) == 0 return nothing end
     return sub[1, :Variant]
+end
+
+function get_best_in_class(variants::Vector{String}, df::DataFrame)
+    isempty(variants) && return nothing
+    
+    problems = unique(df.Problem)
+    infeasible_statuses = ["INFEASIBLE_STATIONARY", "STALLED_INFEASIBLE"]
+    f_tol = 1e-5
+    h_tol = 1e-5
+    
+    success_counts = Dict(v => 0 for v in variants)
+    time_sums = Dict(v => 0.0 for v in variants)
+    
+    for p in problems
+        df_p = df[df.Problem .== p, :]
+        
+        # Etapa 1: Encontrar o melhor F (F_min) entre as variantes analisadas
+        best_f = Inf
+        for row in eachrow(df_p)
+            if row.Variant in variants && !(row.Status in infeasible_statuses) && row.h_norm <= h_tol
+                best_f = min(best_f, Float64(row.f_final))
+            end
+        end
+        
+        isinf(best_f) && continue
+        
+        # Etapa 2: Contabilizar sucesso e tempo para as que atingiram F_min
+        for row in eachrow(df_p)
+            if row.Variant in variants && !(row.Status in infeasible_statuses) && row.h_norm <= h_tol
+                f_val = Float64(row.f_final)
+                if f_val <= best_f + f_tol + f_tol * abs(best_f)
+                    success_counts[row.Variant] += 1
+                    time_sums[row.Variant] += Float64(row.Time_ms)
+                end
+            end
+        end
+    end
+    
+    stats = []
+    for v in variants
+        cnt = success_counts[v]
+        mean_time = cnt > 0 ? time_sums[v] / cnt : Inf
+        push!(stats, (Variant=v, Solved=cnt, Time=mean_time))
+    end
+    
+    isempty(stats) && return nothing
+    
+    # Ordena por maior número de sucessos e desempata por menor tempo médio
+    sort!(stats, by = x -> (-x.Solved, x.Time))
+    
+    return stats[1].Variant
 end
 
 """
@@ -490,6 +541,109 @@ omitido, cai de volta no ciclo automático de cores do Plots.jl.
 #     savefig(p, filename)
 #     println("  > Saved: $(basename(filename))")
 # end
+# function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol, title_str::String, filename::String, color_map::AbstractDict=Dict{String,Any}())
+#     if length(solvers) < 2
+#         println("  > Skipping '$title_str': Not enough valid solvers in this group.")
+#         return
+#     end
+
+#     problems = unique(df.Problem)
+#     n_probs = length(problems)
+#     n_solvers = length(solvers)
+
+#     perf_matrix = fill(Inf, n_probs, n_solvers)
+
+#     infeasible_statuses = ["INFEASIBLE_STATIONARY", "STALLED_INFEASIBLE"]
+#     f_tol = 1e-5 # Tolerância numérica para considerar empate na função objetivo
+#     h_tol = 1e-5 # Tolerância máxima de violação para atestar viabilidade
+
+#     for (i, p) in enumerate(problems)
+#         df_p = df[df.Problem .== p, :]
+        
+#         # Etapa 1: Encontrar a melhor função objetivo (F_min) entre os solvers viáveis
+#         best_f = Inf
+#         for s in solvers
+#             row = df_p[df_p.Variant .== s, :]
+#             if nrow(row) > 0
+#                 status = row[1, :Status]
+#                 h_val = Float64(row[1, :h_norm])
+                
+#                 if !(status in infeasible_statuses) && h_val <= h_tol
+#                     f_val = Float64(row[1, :f_final])
+#                     best_f = min(best_f, f_val)
+#                 end
+#             end
+#         end
+
+#         isinf(best_f) && continue
+
+#         # Etapa 2: Preencher a matriz de performance para os que atingiram F_min
+#         for (j, s) in enumerate(solvers)
+#             row = df_p[df_p.Variant .== s, :]
+#             if nrow(row) > 0
+#                 status = row[1, :Status]
+#                 h_val = Float64(row[1, :h_norm])
+                
+#                 if !(status in infeasible_statuses) && h_val <= h_tol
+#                     f_val = Float64(row[1, :f_final])
+                    
+#                     if f_val <= best_f + f_tol + f_tol * abs(best_f)
+#                         val = Float64(row[1, metric_col])
+#                         perf_matrix[i, j] = val <= 0.0 ? 1e-8 : val
+#                     end
+#                 end
+#             end
+#         end
+#     end
+
+#     min_vals = minimum(perf_matrix, dims=2)
+#     ratios = perf_matrix ./ min_vals
+#     ratios[isnan.(ratios)] .= Inf
+
+#     valid_ratios = filter(x -> !isinf(x), ratios)
+#     max_tau = isempty(valid_ratios) ? 10.0 : maximum(valid_ratios)
+#     plot_max = max(10.0, max_tau * 1.1)
+
+#     p = plot(title=title_str, 
+#              xlabel="Performance Ratio (τ)", 
+#              ylabel="Fraction of Solved Problems", 
+#              legend=:bottomright, 
+#              xscale=:log10, 
+#              framestyle=:box,
+#              dpi=300,
+#              size=(800, 600))
+
+#     for (j, s) in enumerate(solvers)
+#         sorted_r = sort(ratios[:, j])
+#         filter!(x -> !isinf(x), sorted_r)
+        
+#         n_solved = length(sorted_r)
+        
+#         x_vals = [1.0]
+#         y_vals = [0.0]
+        
+#         for (k, r) in enumerate(sorted_r)
+#             push!(x_vals, r)
+#             push!(y_vals, k / n_probs)
+#         end
+        
+#         push!(x_vals, plot_max)
+#         push!(y_vals, n_solved / n_probs)
+
+#         clean_label = replace(s, "UNIF_" => "UNIF ", "2P_" => "2P ", "BASE_UNIF" => "UNIF SAR1_PH0_ATR0", "BASE_2P" => "2P SAR1_PH0_ATR0_RRU0")
+
+#         line_color = get(color_map, s, nothing)
+#         if line_color === nothing
+#             plot!(p, x_vals, y_vals, linetype=:steppost, label=clean_label, linewidth=2.5)
+#         else
+#             plot!(p, x_vals, y_vals, linetype=:steppost, label=clean_label, linewidth=2.5, color=line_color)
+#         end
+#     end
+
+#     savefig(p, filename)
+#     println("  > Saved: $(basename(filename))")
+# end
+
 function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol, title_str::String, filename::String, color_map::AbstractDict=Dict{String,Any}())
     if length(solvers) < 2
         println("  > Skipping '$title_str': Not enough valid solvers in this group.")
@@ -503,13 +657,13 @@ function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol
     perf_matrix = fill(Inf, n_probs, n_solvers)
 
     infeasible_statuses = ["INFEASIBLE_STATIONARY", "STALLED_INFEASIBLE"]
-    f_tol = 1e-5 # Tolerância numérica para considerar empate na função objetivo
-    h_tol = 1e-5 # Tolerância máxima de violação para atestar viabilidade
+    f_tol = 1e-5
+    h_tol = 1e-5
 
     for (i, p) in enumerate(problems)
         df_p = df[df.Problem .== p, :]
         
-        # Etapa 1: Encontrar a melhor função objetivo (F_min) entre os solvers viáveis
+        # Etapa 1: Encontrar F_min entre os métodos viáveis
         best_f = Inf
         for s in solvers
             row = df_p[df_p.Variant .== s, :]
@@ -526,7 +680,7 @@ function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol
 
         isinf(best_f) && continue
 
-        # Etapa 2: Preencher a matriz de performance para os que atingiram F_min
+        # Etapa 2: Preencher a performance para os que atingiram F_min
         for (j, s) in enumerate(solvers)
             row = df_p[df_p.Variant .== s, :]
             if nrow(row) > 0
@@ -579,7 +733,8 @@ function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol
         push!(x_vals, plot_max)
         push!(y_vals, n_solved / n_probs)
 
-        clean_label = replace(s, "UNIF_" => "UNIF ", "2P_" => "2P ", "BASE_UNIF" => "UNIF SAR1_PH0_ATR0", "BASE_2P" => "2P SAR1_PH0_ATR0_RRU0")
+        # Atualizado para lidar com as nomenclaturas SLP
+        clean_label = replace(s, "SLP_" => "UNIF ", "UNIF_" => "UNIF ", "2P_" => "2P ", "BASE_SLP" => "UNIF SAR1_PH0_ATR0", "BASE_UNIF" => "UNIF SAR1_PH0_ATR0", "BASE_2P" => "2P SAR1_PH0_ATR0_RRU0")
 
         line_color = get(color_map, s, nothing)
         if line_color === nothing
@@ -601,8 +756,8 @@ function plot_outcome_distribution(df::DataFrame, summary::DataFrame, out_dir::S
     unif_qn = filter(v -> startswith(v, "UNIF") && occursin("QUASI_NEWTON", v), all_variants)
     tp_qn   = filter(v -> startswith(v, "2P")   && occursin("QUASI_NEWTON", v), all_variants)
     
-    best_unif_var = get_best_in_class(unif_qn, summary)
-    best_2p_var   = get_best_in_class(tp_qn, summary)
+    best_unif_var = get_best_in_class_old(unif_qn, summary)
+    best_2p_var   = get_best_in_class_old(tp_qn, summary)
 
     if isnothing(best_unif_var) || isnothing(best_2p_var)
         println("⚠️ Not enough data to compare 2P-QN vs UNIF-QN.")
@@ -688,8 +843,8 @@ function plot_solution_quality_histogram(df::DataFrame, summary::DataFrame, out_
     unif_qn = filter(v -> startswith(v, "UNIF") && occursin("QUASI_NEWTON", v), all_variants)
     tp_qn   = filter(v -> startswith(v, "2P")   && occursin("QUASI_NEWTON", v), all_variants)
     
-    best_unif_var = get_best_in_class(unif_qn, summary)
-    best_2p_var   = get_best_in_class(tp_qn, summary)
+    best_unif_var = get_best_in_class_old(unif_qn, summary)
+    best_2p_var   = get_best_in_class_old(tp_qn, summary)
     ipopt_var     = "IPOPT"
 
     gaps_2p_ipopt = Float64[]
