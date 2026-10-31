@@ -626,8 +626,10 @@ function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::Union{Flo
 
         if stats.status == :first_order || stats.status == :acceptable
             copy!(buffers.s_val, stats.solution)
-            buffers.λ = stats.multipliers[1:m]
-            return true, -dot(buffers.∇f, stats.solution)
+            if m > 0
+                buffers.λ .= stats.multipliers[1:m]
+            end
+            return true, stats.objective
         end
     end
 
@@ -895,7 +897,7 @@ function optimization_phase(
         if !params.parabolic_heuristic
             if params.strong_agreement_rule
                 ared = L_y_lambda - L_zj_lambda
-                pred = L_y_lambda - f_model
+                pred = - f_model
                 
                 rho_unif = 0.5
                 
