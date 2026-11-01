@@ -414,6 +414,20 @@ function optimization_phase(
     buffers.∇f = problem.∇f(buffers.x_temp)
     buffers.∇h = problem.∇h(buffers.x_temp)
 
+    use_new_atr = params.anisotropic_trust_region && params.atr_strategy != :legacy_parabolic
+    g_prev_opt = if use_new_atr
+        -compute_gradient_projection(
+            buffers.x_temp, buffers.∇f, buffers.∇h, buffers.λ, problem.xl, problem.xu;
+            norm_type = params.norm_gpnorm,
+            strategy = params.gpnorm_strategy,
+            max_iter = params.gpnorm_max_iter,
+            tol = params.gpnorm_tol,
+            debug = false
+        )
+    else
+        Float64[]
+    end
+
     local F_ret = F_y_val
     local h_ret = h_y_val
     local grad_ret = copy(buffers.∇f)
@@ -477,7 +491,7 @@ function optimization_phase(
                 return y, buffers.λ, θ_k, δ, false, F_y_val, h_y_val, buffers.∇f
             end
             # Trust region reduction post-rejection
-            if !params.parabolic_heuristic
+            if !params.parabolic_heuristic && !use_new_atr
                 s_ref = (δ isa Vector) ? abs.(buffers.s_val) : norm(buffers.s_val, Inf)
                 δ_old = copy(δ)
                 δ = clamp.(max.(δ .* params.τ1, s_ref .* params.τ2), params.δmin, params.δmax)
@@ -487,9 +501,9 @@ function optimization_phase(
                 s_inf = norm(buffers.s_val, Inf)
 
                 if params.anisotropic_trust_region
-                parabolic_heuristic_mode = isodd(consecutive_rejects) ? :reshape : :shrink
+                    parabolic_heuristic_mode = isodd(consecutive_rejects) ? :reshape : :shrink
                 else
-                parabolic_heuristic_mode = :shrink
+                    parabolic_heuristic_mode = :shrink
                 end
                 params.debugverbose && println("🔍 [DEBUG-OPT] Parabolic Heuristic (mode: $parabolic_heuristic_mode). Consecutive rejects: $consecutive_rejects")
                 δ = parabolic_heuristic_step!(
@@ -501,8 +515,12 @@ function optimization_phase(
                     max_reduction_ratio=params.parabolic_max_reduction_ratio,
                     min_increase_ratio=params.parabolic_min_increase_ratio,
                     max_increase_ratio=params.parabolic_max_increase_ratio,
+                    ared_val=(L_y_lambda - L_zj_lambda),
+                    pred_val=(-f_model),
+                    g_prev=g_prev_opt,
+                    d_curv=buffers.d_curv,
                 )
-                if params.anisotropic_trust_region && consecutive_rejects >= 2
+                if params.anisotropic_trust_region && !use_new_atr && consecutive_rejects >= 2
                     was_corrected = enforce_aspect_ratio!(δ, 0.15)
                     was_corrected && params.verbose_out && verbose && println("🎈 [Rescue] Re-inflating dimensions.")
                 end
@@ -577,7 +595,27 @@ function optimization_phase(
                 return y, buffers.λ, θ, δ, false, F_ret, h_ret, grad_ret
             end
             δ_old = copy(δ)
-            δ = clamp.(δ .* params.τ2, params.δmin, params.δmax)
+            if use_new_atr
+                s_inf = norm(buffers.s_val, Inf)
+                pred_merit = max(1e-12, θ * max(-f_model, 0.0) + (1.0 - θ) * max(norm_h_xk - norm_h_y, 0.0))
+                ared_merit = Phi_xk_theta - Phi_zj_theta
+                δ = parabolic_heuristic_step!(
+                    δ, Phi_xk_theta, Phi_zj_theta, -pred_merit, params,
+                    s_inf, step_norm_sq, :decrease;
+                    anisotropic=true,
+                    s_vec=buffers.s_val, grad=buffers.∇f, mode=:shrink,
+                    min_reduction_ratio=params.parabolic_min_reduction_ratio,
+                    max_reduction_ratio=params.parabolic_max_reduction_ratio,
+                    min_increase_ratio=params.parabolic_min_increase_ratio,
+                    max_increase_ratio=params.parabolic_max_increase_ratio,
+                    ared_val=ared_merit,
+                    pred_val=pred_merit,
+                    g_prev=g_prev_opt,
+                    d_curv=buffers.d_curv,
+                )
+            else
+                δ = clamp.(δ .* params.τ2, params.δmin, params.δmax)
+            end
             j += 1
             
             params.debugverbose && println("🔍 [DEBUG-OPT] Merit failure. Shrinking δ from $δ_old to $δ")
@@ -598,7 +636,7 @@ function optimization_phase(
         grad_ret = ∇f_new_accepted
         
         # Trust region expansion
-        if !params.parabolic_heuristic
+        if !params.parabolic_heuristic && !use_new_atr
             if params.strong_agreement_rule
                 ared = L_y_lambda - L_zj_lambda
                 pred = - f_model
@@ -618,13 +656,53 @@ function optimization_phase(
         else
             params.debugverbose && println("🔍 [DEBUG-OPT] Applying Quadratic Backtracking for Trust Region expansion.")
             s_inf = norm(buffers.s_val, Inf)
-            δ = parabolic_heuristic_step!(
-                δ, L_y_lambda, L_zj_lambda, f_model, params, 
-                s_inf, step_norm_sq, :increase; 
-                anisotropic=params.anisotropic_trust_region, 
-                s_vec=buffers.s_val, grad=∇f_new_accepted, 
-                grad_old=buffers.∇f_old, mode=:shrink
-            )
+            if use_new_atr
+                jac_new_acc = problem.∇h(buffers.x_temp)
+                g_curr_opt = -compute_gradient_projection(
+                    buffers.x_temp, ∇f_new_accepted, jac_new_acc, buffers.λ, problem.xl, problem.xu;
+                    norm_type = params.norm_gpnorm,
+                    strategy = params.gpnorm_strategy,
+                    max_iter = params.gpnorm_max_iter,
+                    tol = params.gpnorm_tol,
+                    debug = false
+                )
+                jac_diff_l1 = zeros(n)
+                if m > 0
+                    @inbounds for col in 1:n
+                        csum = 0.0
+                        for row in 1:m
+                            csum += abs(jac_new_acc[row, col] - buffers.∇h[row, col])
+                        end
+                        jac_diff_l1[col] = csum
+                    end
+                end
+                δ = parabolic_heuristic_step!(
+                    δ, L_y_lambda, L_zj_lambda, f_model, params, 
+                    s_inf, step_norm_sq, :increase; 
+                    anisotropic=true, 
+                    s_vec=buffers.s_val, grad=∇f_new_accepted, 
+                    grad_old=buffers.∇f_old, mode=:shrink,
+                    min_reduction_ratio=params.parabolic_min_reduction_ratio,
+                    max_reduction_ratio=params.parabolic_max_reduction_ratio,
+                    min_increase_ratio=params.parabolic_min_increase_ratio,
+                    max_increase_ratio=params.parabolic_max_increase_ratio,
+                    ared_val=(L_y_lambda - L_zj_lambda),
+                    pred_val=(-f_model),
+                    g_prev=g_prev_opt,
+                    g_curr=g_curr_opt,
+                    jac_diff_col_l1=jac_diff_l1,
+                    theta_merit=θ,
+                    d_curv=buffers.d_curv,
+                )
+            else
+                δ = parabolic_heuristic_step!(
+                    δ, L_y_lambda, L_zj_lambda, f_model, params, 
+                    s_inf, step_norm_sq, :increase; 
+                    anisotropic=params.anisotropic_trust_region, 
+                    s_vec=buffers.s_val, grad=∇f_new_accepted, 
+                    grad_old=buffers.∇f_old, mode=:shrink
+                )
+            end
         end
         break 
     end

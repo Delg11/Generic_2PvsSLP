@@ -217,21 +217,33 @@ function run_worker_warmup()
     local nlp_cutest = nothing
     try
         # 1. Warmup completo com CUTEst para compilar antecipadamente os bindings C e especializações de tipos
-        nlp_cutest = CUTEstModel{Float64}("HS6"; decode=true)
-        prob_cutest = SharedTypes.build_optimization_problem(nlp_cutest)
-        x0_cutest = clamp.(nlp_cutest.meta.x0, prob_cutest.xl, prob_cutest.xu)
+        nlp_cutest = try
+            CUTEstModel{Float64}("HS6"; decode=false)
+        catch
+            try
+                CUTEstModel{Float64}("HS6"; decode=true)
+            catch
+                nothing
+            end
+        end
+        if !isnothing(nlp_cutest)
+            prob_cutest = SharedTypes.build_optimization_problem(nlp_cutest)
+            x0_cutest = clamp.(nlp_cutest.meta.x0, prob_cutest.xl, prob_cutest.xu)
 
-        # 2. Aquece TwoPhase (Base sem heurística e variante com heurística)
-        tp_warm_base = SharedTypes.TwoPhaseParams(max_outer_iter=2, verbose_out=false, verbose_in=false, parabolic_heuristic=false, anisotropic_trust_region=false)
-        tp_warm_ph   = SharedTypes.TwoPhaseParams(max_outer_iter=2, verbose_out=false, verbose_in=false, parabolic_heuristic=true, anisotropic_trust_region=false)
-        Generic_module_Twophase.two_phase_optimization(prob_cutest, x0_cutest, tp_warm_base; history=false)
-        Generic_module_Twophase.two_phase_optimization(prob_cutest, x0_cutest, tp_warm_ph; history=false)
+            # 2. Aquece TwoPhase (Base sem heurística e variante com heurística)
+            tp_warm_base = SharedTypes.TwoPhaseParams(max_outer_iter=2, verbose_out=false, verbose_in=false, parabolic_heuristic=false, anisotropic_trust_region=false)
+            tp_warm_ph   = SharedTypes.TwoPhaseParams(max_outer_iter=2, verbose_out=false, verbose_in=false, parabolic_heuristic=true, anisotropic_trust_region=false)
+            Generic_module_Twophase.two_phase_optimization(prob_cutest, x0_cutest, tp_warm_base; history=false)
+            Generic_module_Twophase.two_phase_optimization(prob_cutest, x0_cutest, tp_warm_ph; history=false)
 
-        # 3. Aquece UNIF (Base sem heurística e variante com heurística)
-        unif_warm_base = SharedTypes.UNIFParams(maxiter=2, verbose=false, parabolic_heuristic=false, anisotropic_trust_region=false)
-        unif_warm_ph   = SharedTypes.UNIFParams(maxiter=2, verbose=false, parabolic_heuristic=true, anisotropic_trust_region=false)
-        Generic_module_unif.solve_unif_trust_region(prob_cutest, x0_cutest, unif_warm_base)
-        Generic_module_unif.solve_unif_trust_region(prob_cutest, x0_cutest, unif_warm_ph)
+            # 3. Aquece UNIF (Base sem heurística e variante com heurística)
+            unif_warm_base = SharedTypes.UNIFParams(maxiter=2, verbose=false, parabolic_heuristic=false, anisotropic_trust_region=false)
+            unif_warm_ph   = SharedTypes.UNIFParams(maxiter=2, verbose=false, parabolic_heuristic=true, anisotropic_trust_region=false)
+            Generic_module_unif.solve_unif_trust_region(prob_cutest, x0_cutest, unif_warm_base)
+            Generic_module_unif.solve_unif_trust_region(prob_cutest, x0_cutest, unif_warm_ph)
+        else
+            error("CUTEst HS6 warmup failed, using Rosenbrock fallback")
+        end
     catch
         try
             nlp_w = SharedTypes.create_rosenbrock_problem1()

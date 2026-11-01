@@ -39,6 +39,27 @@ Generic_2PvsSLP/
 
 ---
 
+## Escopo Matemático e Restrições Estruturais dos Problemas
+
+O repositório é projetado para classes de Programação Não-Linear com **canalização em caixa** e **restrições de igualdade pura**:
+$$\min_{x \in \mathbb{R}^n} f(x) \quad \text{sujeito a} \quad h(x) = 0, \quad x_l \le x \le x_u$$
+
+### 1. Requisito de Posto e Restrições de Igualdade ($m \le n$)
+- **Problemas Válidos:**
+  - Irrestritos ou com cotas em caixa ($m = 0$).
+  - Restrições de igualdade com $m \le n$ que satisfaçam a Qualificação de Independência Linear das Restrições (LICQ), ou seja, $\text{posto}(J(x)) = m$.
+- **Problemas Fora do Escopo:**
+  - **Sistemas Sobre-Determinados ($m > n$):** Formulações como problemas de mínimos quadrados não-lineares da biblioteca SIF com centenas de equações de resíduos para poucas variáveis (ex: `CHWIRUT1` com $n=3, m=214$, `BROWNDENE` com $n=4, m=20$) não possuem graus de liberdade para otimização sob igualdade pura e são automaticamente descartados pelo filtro.
+  - **Restrições de Desigualdade Gerais ($l_{\text{con}} \ne u_{\text{con}}$):** Devem ser previamente reformuladas com variáveis de folga antes da aplicação direta destes algoritmos.
+
+### 2. Condição Estrutural da Projeção de Dykstra (GP-Norm e Gradiente Tangente)
+A função [`compute_gradient_projection`](file:///c:/Github/Generic_2PvsSLP/src/Generic_Sharedtypes.jl#L801-L922) utiliza o algoritmo iterativo de Dykstra para projetar simultaneamente nas cotas de caixa $[x_l, x_u]$ e na variedade tangente linearizada $\ker(J(x)) = \{ d \in \mathbb{R}^n : J(x) d = 0 \}$.
+- A projeção afim resolve a cada iteração de Dykstra o sistema de equações normais:
+  $$(J(x) J(x)^T) \lambda_{\text{proj}} = J(x)(y + r) - b$$
+- **Por que $m \le n$ é indispensável:** Se $m > n$, a matriz $J J^T \in \mathbb{R}^{m \times m}$ possui posto no máximo $n < m$, possuindo obrigatoriamente pelo menos $m - n$ autovalores nulos, o que torna $J J^T$ estritamente singular e inviabiliza a fatoração $LU$. O solver conta com salvaguardas com regularização adaptativa e fallback para projeção em caixa caso $J J^T$ seja singular.
+
+---
+
 ## Características Algorítmicas e Correções Teóricas
 
 O repositório implementa rigorosamente a teoria clássica de métodos de região de confiança para PNL com restrições de igualdade e canalização em caixa:

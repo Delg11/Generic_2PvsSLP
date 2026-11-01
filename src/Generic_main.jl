@@ -9,6 +9,7 @@ using Dates
 using DataFrames
 using CSV
 using XLSX
+ENV["GKSwstype"] = "100"
 using Plots
 
 # ==============================================================================
@@ -60,6 +61,10 @@ function parse_commandline()
             help = "Anisotropic region (Two-Phase). Options: 'all', 'true', 'false'."
             arg_type = String
             default = "all"
+        "--tp-atr-strat"
+            help = "ATR strategies for Two-Phase. Comma-separated (legacy_parabolic,grad_sign,decomposed_cut,secant_box) or 'all'."
+            arg_type = String
+            default = "legacy_parabolic"
         "--tp-rru"
             help = "Ratio update (Two-Phase). Options: 'all', 'true', 'false'."
             arg_type = String
@@ -67,7 +72,7 @@ function parse_commandline()
         "--tp-sqp"
             help = "SQP strategies for Two-Phase. Comma-separated (e.g., none,identity,spectral,exact) or 'all'."
             arg_type = String
-            default = "all"
+            default = "none"
             
         # UNIF Parameters
         "--unif-sar"
@@ -82,10 +87,14 @@ function parse_commandline()
             help = "Anisotropic region (UNIF). Options: 'all', 'true', 'false'."
             arg_type = String
             default = "all"
+        "--unif-atr-strat"
+            help = "ATR strategies for UNIF. Comma-separated (legacy_parabolic,grad_sign,decomposed_cut,secant_box) or 'all'."
+            arg_type = String
+            default = "legacy_parabolic"
         "--unif-sqp"
             help = "SQP strategies for UNIF. Comma-separated (e.g., none,identity,spectral,exact) or 'all'."
             arg_type = String
-            default = "all"
+            default = "none"
     end
 
     return parse_args(s)
@@ -94,6 +103,14 @@ end
 function parse_sqp_args(arg_str::String)
     if lowercase(arg_str) == "all"
         return [:exact, :identity, :spectral, :reciprocal, :exponential, :quasi_newton]
+    else
+        return Symbol.(strip.(split(arg_str, ",")))
+    end
+end
+
+function parse_atr_strat_args(arg_str::String)
+    if lowercase(arg_str) == "all"
+        return [:legacy_parabolic, :grad_sign, :decomposed_cut, :secant_box]
     else
         return Symbol.(strip.(split(arg_str, ",")))
     end
@@ -116,7 +133,8 @@ println("⚙️  CONFIGURING VARIANTS AND EXPORT ENVIRONMENT")
 println("=" ^ 80)
 
 println("🖥️  System: $(Sys.CPU_THREADS) threads available")
-println("🚀 Execution: $(nworkers() > 1 ? "Parallel ($(nworkers()) distributed workers)" : "Sequential (1 worker)")")
+target_workers_display = args["workers"] == 0 ? clamp(Sys.CPU_THREADS - 2, 1, 16) : max(1, args["workers"])
+println("🚀 Execution: $(target_workers_display > 1 ? "Parallel ($target_workers_display distributed workers requested)" : "Sequential (1 worker)")")
 println("-" ^ 80)
 
 const RUN_TWOPHASE = args["run-twophase"]
@@ -137,23 +155,25 @@ mkpath(results_dir)
 println("📁 Results directory created: $results_dir")
 
 # --- BUILDER FUNCTIONS ---
-function build_twophase_params(sar, M, ph, atr, rru, use_quad, b_strat)
+function build_twophase_params(sar, M, ph, atr, rru, use_quad, b_strat; atr_strat::Symbol=:legacy_parabolic)
     return SharedTypes.TwoPhaseParams(
         max_outer_iter = common_max_iter, δ0_opt = common_delta0, δ0_resto = common_delta0,
         tolG = common_tolG, tolF = common_tolF, tolS = common_tolS, maxcount = common_maxcount,
         verbose_out = common_verbose, use_unif_stopping = true, rfeas = 1e-12, δmin = 1e-12, 
         δmax = 1e16, r_resto = 0.9, τ1 = 0.1, τ2 = 0.25, αL = 1e-8, αR = 1e-8,
         θ0 = 0.90, αΦ = 1e-8, max_iter_resto = 500, verbose_in = common_verbose, debugverbose = false,
-        strong_agreement_rule = sar, non_monotone_M = M, parabolic_heuristic = ph, anisotropic_trust_region = atr, restoration_ratio_update = rru,
+        strong_agreement_rule = sar, non_monotone_M = M, parabolic_heuristic = ph, anisotropic_trust_region = atr,
+        atr_strategy = atr_strat, restoration_ratio_update = rru,
         use_quadratic = use_quad, B_update_strategy = b_strat, quadratic_solver = :ripqp
     )
 end
 
-function build_unif_params(sar, ph, atr, use_quad, b_strat)
+function build_unif_params(sar, ph, atr, use_quad, b_strat; atr_strat::Symbol=:legacy_parabolic)
     return SharedTypes.UNIFParams(
         delta0 = common_delta0, tolG = common_tolG, tolF = common_tolF, tolS = common_tolS,
         maxiter = common_max_iter, maxcount = common_maxcount, verbose = common_verbose,
         verbose_out = common_verbose, debugverbose = false, parabolic_heuristic = ph, anisotropic_trust_region = atr,
+        atr_strategy = atr_strat,
         strong_agreement_rule = sar, use_quadratic = use_quad, B_update_strategy = b_strat, quadratic_solver = :ripqp
     )
 end
@@ -165,6 +185,7 @@ if RUN_TWOPHASE
     tp_rru_opts = [true] # Forçado para true conforme restrição
     tp_ph_opts  = args["tp-ph"]  == "all" ? [false, true] : (args["tp-ph"]  == "true" ? [true] : [false])
     tp_atr_opts = args["tp-atr"] == "all" ? [false, true] : (args["tp-atr"] == "true" ? [true] : [false])
+    tp_atr_strats = parse_atr_strat_args(args["tp-atr-strat"])
     
     sqp_strategies = parse_sqp_args(args["tp-sqp"])
     
@@ -173,19 +194,25 @@ if RUN_TWOPHASE
         if !ph && atr continue end
         if ph && sar continue end
         
-        use_quad = (strat != :none)
-        b_strat = use_quad ? strat : :identity
-        is_base = (sar && M == 1 && !ph && !atr && !rru && !use_quad)
-        
-        name = is_base ? "BASE_2P" : "2P_SAR$(Int(sar))_PH$(Int(ph))_ATR$(Int(atr))_RRU$(Int(rru))"
-        if use_quad
-            name = name * "_SQP_$(uppercase(string(strat)))"
+        active_atr_strats = atr ? tp_atr_strats : [:legacy_parabolic]
+        for atr_st in active_atr_strats
+            use_quad = (strat != :none)
+            b_strat = use_quad ? strat : :identity
+            is_base = (sar && M == 1 && !ph && !atr && !rru && !use_quad)
+            
+            name = is_base ? "BASE_2P" : "2P_SAR$(Int(sar))_PH$(Int(ph))_ATR$(Int(atr))_RRU$(Int(rru))"
+            if atr && atr_st != :legacy_parabolic
+                name = name * "_$(uppercase(string(atr_st)))"
+            end
+            if use_quad
+                name = name * "_SQP_$(uppercase(string(strat)))"
+            end
+            
+            push!(twophase_variants, (
+                name=name, is_base=is_base, params=build_twophase_params(sar, M, ph, atr, rru, use_quad, b_strat; atr_strat=atr_st), 
+                SAR=sar, M=M, PH=ph, ATR=atr, RRU=rru
+            ))
         end
-        
-        push!(twophase_variants, (
-            name=name, is_base=is_base, params=build_twophase_params(sar, M, ph, atr, rru, use_quad, b_strat), 
-            SAR=sar, M=M, PH=ph, ATR=atr, RRU=rru
-        ))
     end
 end
 
@@ -194,25 +221,33 @@ unif_variants = []
 if RUN_UNIF
     unif_ph_opts  = args["unif-ph"]  == "all" ? [false, true] : (args["unif-ph"]  == "true" ? [true] : [false])
     unif_atr_opts = args["unif-atr"] == "all" ? [false, true] : (args["unif-atr"] == "true" ? [true] : [false])
+    unif_atr_strats = parse_atr_strat_args(args["unif-atr-strat"])
     sqp_strategies = parse_sqp_args(args["unif-sqp"])
     unif_sar_opts = args["unif-sar"] == "all" ? [false, true] : (args["unif-sar"] == "true" ? [true] : [false])
 
     for sar in unif_sar_opts, ph in unif_ph_opts, atr in unif_atr_opts, strat in sqp_strategies
         if !ph && atr continue end
         if ph && sar continue end
-        use_quad = (strat != :none)
-        b_strat = use_quad ? strat : :identity
-        is_base = (sar && !ph && !atr && !use_quad)
-        
-        name = is_base ? "BASE_UNIF" : "UNIF_SAR$(Int(sar))_PH$(Int(ph))_ATR$(Int(atr))"
-        if use_quad
-            name = name * "_SQP_$(uppercase(string(strat)))"
+
+        active_atr_strats = atr ? unif_atr_strats : [:legacy_parabolic]
+        for atr_st in active_atr_strats
+            use_quad = (strat != :none)
+            b_strat = use_quad ? strat : :identity
+            is_base = (sar && !ph && !atr && !use_quad)
+            
+            name = is_base ? "BASE_UNIF" : "UNIF_SAR$(Int(sar))_PH$(Int(ph))_ATR$(Int(atr))"
+            if atr && atr_st != :legacy_parabolic
+                name = name * "_$(uppercase(string(atr_st)))"
+            end
+            if use_quad
+                name = name * "_SQP_$(uppercase(string(strat)))"
+            end
+            
+            push!(unif_variants, (
+                name=name, is_base=is_base, params=build_unif_params(sar, ph, atr, use_quad, b_strat; atr_strat=atr_st), 
+                SAR=sar, PH=ph, ATR=atr
+            ))
         end
-        
-        push!(unif_variants, (
-            name=name, is_base=is_base, params=build_unif_params(sar, ph, atr, use_quad, b_strat), 
-            SAR=sar, PH=ph, ATR=atr
-        ))
     end
 end
 
@@ -236,14 +271,33 @@ elseif args["mode"] == "small"
     println("\n🎯 SMALL mode activated. Running fast benchmark on $(length(problems)) problems: $(join(problems, ", "))")
 elseif args["mode"] == "filter"
     println("\nFILTER mode activated. Building query...")
-    filters = Dict{Symbol, Int}()
+    filters = Dict{Symbol, Any}(:only_equ_con => true)
     if args["max-var"] != -1
         filters[:max_var] = args["max-var"]
     end
     if args["max-con"] != -1
         filters[:max_con] = args["max-con"]
     end
-    problems = select_sif_problems(; filters...)
+    raw_problems = select_sif_problems(; filters...)
+    println("Candidate problems from CUTEst classification: $(length(raw_problems))")
+    print("🔍 Validating mathematical compatibility (m <= n, pure equality/bounds)... ")
+    problems = String[]
+    for p in raw_problems
+        local nlp = nothing
+        try
+            nlp = CUTEstModel{Float64}(p; decode=true)
+            n = nlp.meta.nvar
+            m = nlp.meta.ncon
+            is_compat = (m == 0) || (m <= n && m == length(nlp.meta.jfix))
+            if is_compat
+                push!(problems, p)
+            end
+        catch
+        finally
+            isnothing(nlp) || finalize(nlp)
+        end
+    end
+    println("OK ($(length(problems)) problems retained)")
 else
     println("\n❌ ERROR: Invalid mode ('$(args["mode"])'). Use 'test', 'small', or 'filter'.")
     exit(1)
@@ -409,7 +463,7 @@ function main()
     println("\n🔬 Generating reproducibility and provenance metadata...")
     meta = Reproducibility.collect_environment_metadata(
         mode = args["mode"],
-        workers_count = is_parallel ? nworkers() : 1,
+        workers_count = is_parallel ? actual_workers : 1,
         start_time = benchmark_start_time
     )
     meta["execution"]["end_time"] = Dates.format(now(), "yyyy-mm-ddTHH:MM:SS")

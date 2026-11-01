@@ -101,10 +101,12 @@ mutable struct OptimizedBuffers
     h_old::Vector{Float64}; ∇h::Matrix{Float64}; λ::Vector{Float64}
     lvar::Vector{Float64}; uvar::Vector{Float64}
     Lgrad_old::Vector{Float64}
+    d_curv::Vector{Float64}
 
     function OptimizedBuffers(n::Int, m::Int)
         new(zeros(n), zeros(n), zeros(n), 0.0, 0.0, zeros(n), zeros(n), 
-            zeros(n), zeros(n), zeros(m), zeros(m, n), zeros(m), zeros(n), zeros(n))
+            zeros(n), zeros(n), zeros(m), zeros(m, n), zeros(m), zeros(n), zeros(n),
+            zeros(n), ones(n))
     end
 end
 
@@ -155,6 +157,9 @@ Base.@kwdef mutable struct TwoPhaseParams
     strong_agreement_rule::Bool = true # flag to enable/disable ared/pred ratio-based trust region expansion
     parabolic_heuristic::Bool = true
     anisotropic_trust_region::Bool = true
+    atr_strategy::Symbol = :legacy_parabolic # Options: :legacy_parabolic, :grad_sign, :decomposed_cut, :secant_box
+    atr_max_cond::Float64 = 100.0            # Maximum anisotropy condition number max(δ)/min(δ)
+    secant_ema_beta::Float64 = 0.5           # EMA smoothing factor for diagonal secant curvature
     restoration_ratio_update::Bool = true
     ratio_safeguard_tol::Float64 = 1e-12
     ratio_max_factor::Float64 = 2.0
@@ -219,6 +224,9 @@ Base.@kwdef mutable struct UNIFParams
     # parabolic heuristic and Anisotropy Settings
     parabolic_heuristic::Bool = true
     anisotropic_trust_region::Bool = true
+    atr_strategy::Symbol = :legacy_parabolic # Options: :legacy_parabolic, :grad_sign, :decomposed_cut, :secant_box
+    atr_max_cond::Float64 = 100.0            # Maximum anisotropy condition number max(δ)/min(δ)
+    secant_ema_beta::Float64 = 0.5           # EMA smoothing factor for diagonal secant curvature
     parabolic_min_reduction_ratio::Float64 = 0.1
     parabolic_max_reduction_ratio::Float64 = 0.5
     parabolic_min_increase_ratio::Float64 = 1.0
@@ -391,8 +399,265 @@ function enforce_aspect_ratio!(δ::Vector{Float64}, min_ratio::Float64=1e-3)
     return changed
 end
 
+@inline function _merit_parabolic_terms(
+    f_current::Float64,
+    f_new::Float64,
+    slope::Float64,
+    ared_val::Float64,
+    pred_val::Float64,
+)
+    if isfinite(ared_val) && isfinite(pred_val) && pred_val > 1e-15
+        return pred_val, (pred_val - ared_val)
+    else
+        return max(-slope, 0.0), (f_new - f_current - slope)
+    end
+end
+
+function _atr_grad_sign_step!(
+    δ_current::Vector{Float64},
+    s_vec::Vector{Float64},
+    g_p::Vector{Float64},
+    g_c::Vector{Float64},
+    params,
+    action::Symbol,
+    max_increase_ratio::Float64,
+)
+    n = length(δ_current)
+    δ_new = similar(δ_current)
+
+    if action == :increase
+        has_grads = length(g_p) == n && length(g_c) == n
+        @inbounds for i in 1:n
+            mult_i = 1.0
+            if has_grads
+                prod_i = g_p[i] * g_c[i]
+                u_i = abs(s_vec[i]) / max(δ_current[i], 1e-30)
+                if prod_i < -1e-16
+                    mult_i = 0.5
+                elseif prod_i > 1e-16 && u_i >= 0.5
+                    mult_i = min(1.5, max_increase_ratio)
+                end
+            end
+            δ_new[i] = clamp(δ_current[i] * mult_i, params.δmin, params.δmax)
+        end
+        enforce_aspect_ratio!(δ_new, 1.0 / params.atr_max_cond)
+    else
+        u_max = 0.0
+        @inbounds for i in 1:n
+            u_i = abs(s_vec[i]) / max(δ_current[i], 1e-30)
+            if u_i > u_max
+                u_max = u_i
+            end
+        end
+        if u_max <= 1e-15
+            @inbounds for i in 1:n
+                δ_new[i] = clamp(0.5 * δ_current[i], params.δmin, params.δmax)
+            end
+        else
+            @inbounds for i in 1:n
+                si_abs = abs(s_vec[i])
+                u_hat = (si_abs / max(δ_current[i], 1e-30)) / u_max
+                d_cut = si_abs > 0.0 ? min(0.5 * δ_current[i], 0.75 * si_abs) : 0.5 * δ_current[i]
+                δ_new[i] = clamp((1.0 - u_hat) * δ_current[i] + u_hat * d_cut, params.δmin, params.δmax)
+            end
+        end
+    end
+    return δ_new
+end
+
+function _atr_decomposed_cut_step!(
+    δ_current::Vector{Float64},
+    f_current::Float64,
+    f_new::Float64,
+    slope::Float64,
+    ared_val::Float64,
+    pred_val::Float64,
+    s_vec::Vector{Float64},
+    g_p::Vector{Float64},
+    g_c::Vector{Float64},
+    params,
+    action::Symbol,
+    min_reduction_ratio::Float64,
+    max_reduction_ratio::Float64,
+    min_increase_ratio::Float64,
+    max_increase_ratio::Float64,
+)
+    n = length(δ_current)
+    δ_new = similar(δ_current)
+
+    if action == :decrease
+        pred, R = _merit_parabolic_terms(f_current, f_new, slope, ared_val, pred_val)
+        τ_parab = (R > params.ratio_safeguard_tol && pred > 0.0) ?
+                  clamp(pred / (2.0 * R), min_reduction_ratio, max_reduction_ratio) :
+                  max_reduction_ratio
+
+        u_max_sq = 0.0
+        @inbounds for i in 1:n
+            u_sq = (s_vec[i] / max(δ_current[i], 1e-30))^2
+            if u_sq > u_max_sq
+                u_max_sq = u_sq
+            end
+        end
+
+        if u_max_sq <= 1e-30
+            @inbounds for i in 1:n
+                δ_new[i] = clamp(τ_parab * δ_current[i], params.δmin, params.δmax)
+            end
+        else
+            @inbounds for i in 1:n
+                si_abs = abs(s_vec[i])
+                ω_i = ((si_abs / max(δ_current[i], 1e-30))^2) / u_max_sq
+                d_cut = si_abs > 0.0 ? min(τ_parab * δ_current[i], 0.75 * si_abs) : τ_parab * δ_current[i]
+                δ_new[i] = clamp((1.0 - ω_i) * δ_current[i] + ω_i * d_cut, params.δmin, params.δmax)
+            end
+        end
+    else
+        has_grads = length(g_p) == n && length(g_c) == n
+        ρ_glob = (isfinite(ared_val) && isfinite(pred_val) && pred_val > 1e-15) ? (ared_val / pred_val) : 1.0
+
+        @inbounds for i in 1:n
+            u_i = clamp(abs(s_vec[i]) / max(δ_current[i], 1e-30), 0.0, 1.0)
+            mult_i = 1.0
+            if has_grads
+                prod_i = g_p[i] * g_c[i]
+                b_i = g_p[i] * s_vec[i]
+                if prod_i < -1e-16
+                    α_star = abs(g_p[i]) / (abs(g_p[i]) + abs(g_c[i]))
+                    mult_i = 1.0 - u_i * (1.0 - clamp(α_star, 0.5, 0.95))
+                elseif b_i < -1e-16
+                    c_i = (g_c[i] - g_p[i]) * s_vec[i]
+                    raw_inc = (c_i > 1e-16) ? clamp(-b_i / c_i, min_increase_ratio, max_increase_ratio) : max_increase_ratio
+                    mult_i = 1.0 + u_i * (raw_inc - 1.0)
+                elseif u_i >= 0.8 && ρ_glob >= 0.5
+                    mult_i = 1.0 + u_i * (min(1.5, max_increase_ratio) - 1.0)
+                end
+            end
+            δ_new[i] = clamp(δ_current[i] * mult_i, params.δmin, params.δmax)
+        end
+        enforce_aspect_ratio!(δ_new, 1.0 / params.atr_max_cond)
+    end
+    return δ_new
+end
+
+function _atr_secant_box_step!(
+    δ_current::Vector{Float64},
+    f_current::Float64,
+    f_new::Float64,
+    slope::Float64,
+    ared_val::Float64,
+    pred_val::Float64,
+    s_vec::Vector{Float64},
+    g_p::Vector{Float64},
+    g_c::Vector{Float64},
+    jac_diff_col_l1::Vector{Float64},
+    theta_merit::Float64,
+    d_curv::Vector{Float64},
+    params,
+    action::Symbol,
+    min_reduction_ratio::Float64,
+    max_reduction_ratio::Float64,
+    min_increase_ratio::Float64,
+    max_increase_ratio::Float64,
+)
+    n = length(δ_current)
+    δ_new = similar(δ_current)
+
+    log_Δ = 0.0
+    @inbounds for i in 1:n
+        log_Δ += log(max(δ_current[i], 1e-30))
+    end
+    Δ_k = exp(log_Δ / n)
+
+    if action == :decrease
+        pred, R = _merit_parabolic_terms(f_current, f_new, slope, ared_val, pred_val)
+        τ_parab = (R > params.ratio_safeguard_tol && pred > 0.0) ?
+                  clamp(pred / (2.0 * R), min_reduction_ratio, max_reduction_ratio) :
+                  max_reduction_ratio
+
+        S_W = 0.0
+        @inbounds for i in 1:n
+            w_i = δ_current[i] / max(Δ_k, 1e-30)
+            sw_i = abs(s_vec[i]) / max(w_i, 1e-12)
+            if sw_i > S_W
+                S_W = sw_i
+            end
+        end
+        Δ_new = S_W > 0.0 ? min(τ_parab * Δ_k, 0.75 * S_W) : τ_parab * Δ_k
+        @inbounds for i in 1:n
+            w_i = δ_current[i] / max(Δ_k, 1e-30)
+            δ_new[i] = clamp(Δ_new * w_i, params.δmin, params.δmax)
+        end
+    else
+        u_max = 0.0
+        @inbounds for i in 1:n
+            u_i = abs(s_vec[i]) / max(δ_current[i], 1e-30)
+            if u_i > u_max
+                u_max = u_i
+            end
+        end
+
+        if u_max < 0.5
+            α_Δ = 1.0
+        else
+            pred, R = _merit_parabolic_terms(f_current, f_new, slope, ared_val, pred_val)
+            α_Δ = (R <= params.ratio_safeguard_tol || pred <= 0.0) ?
+                  max_increase_ratio :
+                  clamp(pred / (2.0 * R), min_increase_ratio, max_increase_ratio)
+        end
+        Δ_new = clamp(α_Δ * Δ_k, params.δmin, params.δmax)
+
+        if length(d_curv) == n && length(g_p) == n && length(g_c) == n
+            β = params.secant_ema_beta
+            s_thresh = 1e-10 * max(1.0, Δ_k)
+            has_jac_diff = length(jac_diff_col_l1) == n
+            θ_m = clamp(theta_merit, 0.0, 1.0)
+
+            @inbounds for i in 1:n
+                si_abs = abs(s_vec[i])
+                if si_abs > s_thresh
+                    dy_i = θ_m * abs(g_c[i] - g_p[i]) + (has_jac_diff ? (1.0 - θ_m) * jac_diff_col_l1[i] : 0.0)
+                    if dy_i > 1e-16
+                        d_hat = clamp(dy_i / si_abs, 1e-4, 1e6)
+                        d_curv[i] = β * d_curv[i] + (1.0 - β) * d_hat
+                    end
+                end
+            end
+
+            half_log_κ = 0.5 * log(max(params.atr_max_cond, 1.01))
+            log_w = Vector{Float64}(undef, n)
+            sum_lw = 0.0
+            @inbounds for i in 1:n
+                lw = -0.5 * log(max(d_curv[i], 1e-12))
+                log_w[i] = lw
+                sum_lw += lw
+            end
+            mean_lw = sum_lw / n
+
+            sum_lw2 = 0.0
+            @inbounds for i in 1:n
+                lw_c = clamp(log_w[i] - mean_lw, -half_log_κ, half_log_κ)
+                log_w[i] = lw_c
+                sum_lw2 += lw_c
+            end
+            mean_lw2 = sum_lw2 / n
+
+            @inbounds for i in 1:n
+                w_i = exp(log_w[i] - mean_lw2)
+                δ_new[i] = clamp(Δ_new * w_i, params.δmin, params.δmax)
+            end
+        else
+            @inbounds for i in 1:n
+                w_i = δ_current[i] / max(Δ_k, 1e-30)
+                δ_new[i] = clamp(Δ_new * w_i, params.δmin, params.δmax)
+            end
+        end
+    end
+    return δ_new
+end
+
 """
-Calculates trust region radius using quadratic interpolation models (Parabolic Heuristic).
+Calculates trust region radius using quadratic interpolation models (Parabolic Heuristic)
+or alternative anisotropic trust-region strategies (`params.atr_strategy`).
 """
 function parabolic_heuristic_step!(
     δ_current::T,
@@ -414,6 +679,14 @@ function parabolic_heuristic_step!(
     max_reduction_ratio::Float64=0.5,
     min_increase_ratio::Float64=1.0,
     max_increase_ratio::Float64=2.0,
+
+    ared_val::Float64=NaN,
+    pred_val::Float64=NaN,
+    g_prev::Vector{Float64}=Float64[],
+    g_curr::Vector{Float64}=Float64[],
+    jac_diff_col_l1::Vector{Float64}=Float64[],
+    theta_merit::Float64=1.0,
+    d_curv::Vector{Float64}=Float64[],
 ) where {T<:Union{Float64, Vector{Float64}}}
     # Isotropic behavior execution block
     if !anisotropic || !(δ_current isa Vector)
@@ -442,7 +715,30 @@ function parabolic_heuristic_step!(
         return (δ_current isa Vector) ? fill(δ_val, length(δ_current)) : δ_val
     end
 
-    # Anisotropic calculation setup
+    strat = hasproperty(params, :atr_strategy) ? params.atr_strategy : :legacy_parabolic
+    if strat != :legacy_parabolic
+        g_p = !isempty(g_prev) ? g_prev : (!isempty(grad_old) ? grad_old : grad)
+        g_c = !isempty(g_curr) ? g_curr : grad
+        if strat == :grad_sign
+            return _atr_grad_sign_step!(δ_current, s_vec, g_p, g_c, params, action, max_increase_ratio)
+        elseif strat == :decomposed_cut
+            return _atr_decomposed_cut_step!(
+                δ_current, f_current, f_new, slope, ared_val, pred_val,
+                s_vec, g_p, g_c, params, action,
+                min_reduction_ratio, max_reduction_ratio, min_increase_ratio, max_increase_ratio
+            )
+        elseif strat == :secant_box
+            return _atr_secant_box_step!(
+                δ_current, f_current, f_new, slope, ared_val, pred_val,
+                s_vec, g_p, g_c, jac_diff_col_l1, theta_merit, d_curv, params, action,
+                min_reduction_ratio, max_reduction_ratio, min_increase_ratio, max_increase_ratio
+            )
+        else
+            error("Unsupported atr_strategy: $strat. Valid options: :legacy_parabolic, :grad_sign, :decomposed_cut, :secant_box")
+        end
+    end
+
+    # Legacy Parabolic Anisotropic calculation setup
     n = length(δ_current)
     δ_new = copy(δ_current)
     multipliers = zeros(n)
@@ -554,7 +850,20 @@ function compute_gradient_projection(
             local y_plus_r, res, lambda_proj, jac_t_lambda
             if m > 0
                 J_Jt = jac_h * jac_h'
-                fact_J = lu(J_Jt + 1e-12 * I)
+                fact_J = try
+                    lu(J_Jt + 1e-10 * I)
+                catch
+                    try
+                        lu(Matrix(J_Jt) + 1e-6 * I)
+                    catch
+                        nothing
+                    end
+                end
+                if isnothing(fact_J)
+                    # Fallback suave para projeção em caixa quando J*J' for singular/deficiente em posto (ex: m > n)
+                    copyto!(out_buffer, clamp.(v, xl, xu) .- x)
+                    return
+                end
                 y_plus_r = zeros(n)
                 res = zeros(m)
                 lambda_proj = zeros(m)

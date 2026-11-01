@@ -7,6 +7,7 @@ export run_statistical_analysis
 
 using CSV
 using DataFrames
+ENV["GKSwstype"] = "100"
 using Plots
 using Statistics
 using XLSX
@@ -92,7 +93,7 @@ function run_statistical_analysis(results_dir::String, df_meta::Union{DataFrame,
     df_valid = df_all[.!invalid_mask, :]
 
     all_variants = unique(df_valid.Variant)
-    unif_variants = filter(v -> startswith(v, "SLP") || v == "BASE_SLP", all_variants)
+    unif_variants = filter(v -> startswith(v, "UNIF") || v == "BASE_UNIF" || startswith(v, "SLP") || v == "BASE_SLP", all_variants)
     tp_variants  = filter(v -> startswith(v, "2P") || v == "BASE_2P", all_variants)
 
     # SCENARIO TABLES
@@ -122,14 +123,20 @@ function run_statistical_analysis(results_dir::String, df_meta::Union{DataFrame,
 
     # INTRA-METHOD COMPARISON (Base vs Variants)
     intra_pairs = []
-    if "BASE_SLP" in unif_variants
+    unif_base = ("BASE_UNIF" in unif_variants) ? "BASE_UNIF" :
+                (("UNIF_SAR0_PH1_ATR0" in unif_variants) ? "UNIF_SAR0_PH1_ATR0" :
+                (("BASE_SLP" in unif_variants) ? "BASE_SLP" : nothing))
+    if !isnothing(unif_base)
         for v in unif_variants
-            if v != "BASE_SLP" push!(intra_pairs, ("BASE_SLP", v)) end
+            if v != unif_base push!(intra_pairs, (unif_base, v)) end
         end
     end
-    if "BASE_2P" in tp_variants
+    tp_base = ("BASE_2P" in tp_variants) ? "BASE_2P" :
+              (("2P_SAR1_PH0_ATR0_RRU1" in tp_variants) ? "2P_SAR1_PH0_ATR0_RRU1" :
+              (("2P_SAR0_PH1_ATR0_RRU1" in tp_variants) ? "2P_SAR0_PH1_ATR0_RRU1" : nothing))
+    if !isnothing(tp_base)
         for v in tp_variants
-            if v != "BASE_2P" push!(intra_pairs, ("BASE_2P", v)) end
+            if v != tp_base push!(intra_pairs, (tp_base, v)) end
         end
     end
 
@@ -273,28 +280,31 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
     mkpath(plots_dir)
 
     # ---------------------------------------------------------
-    # GROUP 1: SLP - The Impact of SAR and PH
+    # GROUP 1: UNIF - The Impact of SAR and PH
     # ---------------------------------------------------------
     g1 = get_existing([
-        "BASE_SLP",             # SAR1, PH0
-        "SLP_SAR0_PH0_ATR0",    # SAR0, PH0
-        "SLP_SAR1_PH1_ATR0",    # SAR1, PH1
-        "SLP_SAR0_PH1_ATR0"     # SAR0, PH1
+        "BASE_UNIF",            # SAR1, PH0
+        "UNIF_SAR0_PH0_ATR0",   # SAR0, PH0
+        "UNIF_SAR1_PH1_ATR0",   # SAR1, PH1
+        "UNIF_SAR0_PH1_ATR0"    # SAR0, PH1
     ])
-    # GROUP 1
     plot_profile(df, g1, :Time_ms, "Group 1: UNIF - SAR vs PH (Time)", joinpath(plots_dir, "Profile_G1_UNIF_SAR_PH_Time.png"))
+    plot_profile(df, g1, :Iterations, "Group 1: UNIF - SAR vs PH (Iters)", joinpath(plots_dir, "Profile_G1_UNIF_SAR_PH_Iters.png"))
 
     # ---------------------------------------------------------
-    # GROUP 2: SLP - The Impact of Anisotropy (ATR)
+    # GROUP 2: UNIF - The Impact of Anisotropy (ATR)
     # ---------------------------------------------------------
     g2 = get_existing([
-        "SLP_SAR1_PH1_ATR0",
-        "SLP_SAR1_PH1_ATR1",
-        "SLP_SAR0_PH1_ATR0",
-        "SLP_SAR0_PH1_ATR1"
+        "UNIF_SAR1_PH1_ATR0",
+        "UNIF_SAR1_PH1_ATR1",
+        "UNIF_SAR0_PH1_ATR0",
+        "UNIF_SAR0_PH1_ATR1",
+        "UNIF_SAR0_PH1_ATR1_GRAD_SIGN",
+        "UNIF_SAR0_PH1_ATR1_DECOMPOSED_CUT",
+        "UNIF_SAR0_PH1_ATR1_SECANT_BOX"
     ])
-    # GROUP 2
     plot_profile(df, g2, :Time_ms, "Group 2: UNIF - Anisotropy (Time)", joinpath(plots_dir, "Profile_G2_UNIF_ATR_Time.png"))
+    plot_profile(df, g2, :Iterations, "Group 2: UNIF - Anisotropy (Iters)", joinpath(plots_dir, "Profile_G2_UNIF_ATR_Iters.png"))
     
     # ---------------------------------------------------------
     # GROUP 3: Two-Phase - Ratio Strategies (SAR & RRU)
@@ -306,6 +316,7 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
         "2P_SAR0_PH0_ATR0_RRU1"  # SAR0, RRU1
     ])
     plot_profile(df, g3, :Time_ms, "Group 3: 2P - Ratio Strategies (Time)", joinpath(plots_dir, "Profile_G3_2P_Ratio_Time.png"))
+    plot_profile(df, g3, :Iterations, "Group 3: 2P - Ratio Strategies (Iters)", joinpath(plots_dir, "Profile_G3_2P_Ratio_Iters.png"))
     
     # ---------------------------------------------------------
     # GROUP 4: Two-Phase - Step Shapes (PH & ATR)
@@ -313,14 +324,38 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
     g4 = get_existing([
         "2P_SAR1_PH0_ATR0_RRU1",
         "2P_SAR1_PH1_ATR0_RRU1",
-        "2P_SAR1_PH1_ATR1_RRU1"
+        "2P_SAR1_PH1_ATR1_RRU1",
+        "2P_SAR0_PH1_ATR0_RRU1",
+        "2P_SAR0_PH1_ATR1_RRU1",
+        "2P_SAR0_PH1_ATR1_RRU1_GRAD_SIGN",
+        "2P_SAR0_PH1_ATR1_RRU1_DECOMPOSED_CUT",
+        "2P_SAR0_PH1_ATR1_RRU1_SECANT_BOX"
     ])
-    plot_profile(df, g4, :Time_ms, "Group 4: 2P - Step Shapes (Time)", joinpath(plots_dir, "Profile_G4_2P_Shapes_Time.png"))
+    plot_profile(df, g4, :Time_ms, "Group 4: 2P - Step Shapes & ATR (Time)", joinpath(plots_dir, "Profile_G4_2P_Shapes_Time.png"))
+    plot_profile(df, g4, :Iterations, "Group 4: 2P - Step Shapes & ATR (Iters)", joinpath(plots_dir, "Profile_G4_2P_Shapes_Iters.png"))
 
     # ---------------------------------------------------------
-    # GROUP 5: SLP SQP Hessian Battle
+    # GROUP 8: Direct 2P vs UNIF across Parabolic & ATR Strategies
     # ---------------------------------------------------------
-    unif_pure = filter(v -> occursin("SLP", v) && !occursin("SQP", v), all_variants)
+    g8 = get_existing([
+        "2P_SAR0_PH1_ATR0_RRU1",
+        "2P_SAR0_PH1_ATR1_RRU1",
+        "2P_SAR0_PH1_ATR1_RRU1_GRAD_SIGN",
+        "2P_SAR0_PH1_ATR1_RRU1_DECOMPOSED_CUT",
+        "2P_SAR0_PH1_ATR1_RRU1_SECANT_BOX",
+        "UNIF_SAR0_PH1_ATR0",
+        "UNIF_SAR0_PH1_ATR1",
+        "UNIF_SAR0_PH1_ATR1_GRAD_SIGN",
+        "UNIF_SAR0_PH1_ATR1_DECOMPOSED_CUT",
+        "UNIF_SAR0_PH1_ATR1_SECANT_BOX"
+    ])
+    plot_profile(df, g8, :Time_ms, "Group 8: 2P vs UNIF - All Parabolic/ATR (Time)", joinpath(plots_dir, "Profile_G8_2P_vs_UNIF_ATR_Time.png"))
+    plot_profile(df, g8, :Iterations, "Group 8: 2P vs UNIF - All Parabolic/ATR (Iters)", joinpath(plots_dir, "Profile_G8_2P_vs_UNIF_ATR_Iters.png"))
+
+    # ---------------------------------------------------------
+    # GROUP 5: UNIF SQP Hessian Battle
+    # ---------------------------------------------------------
+    unif_pure = filter(v -> (occursin("UNIF", v) || occursin("SLP", v)) && !occursin("SQP", v), all_variants)
     best_unif = get_best_in_class(unif_pure, summary)
 
     if !isnothing(best_unif)
@@ -329,9 +364,8 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
             "$(best_unif)_SQP_IDENTITY",
             "$(best_unif)_SQP_SPECTRAL"
         ])
-        # GROUP 5
         plot_profile(df, g5, :Time_ms, "Group 5: UNIF SQP Strategies (Time)", joinpath(plots_dir, "Profile_G5_UNIF_SQP_Time.png"))
-    end # <-- END ADICIONADO AQUI
+    end
 
     # ---------------------------------------------------------
     # GROUP 6: 2P SQP Hessian Battle
@@ -351,7 +385,7 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
     # ---------------------------------------------------------
     # GROUP 7: THE GRAND FINALE
     # ---------------------------------------------------------
-    unif_sqp  = filter(v -> occursin("SLP", v) && occursin("SQP", v), all_variants)
+    unif_sqp  = filter(v -> (occursin("UNIF", v) || occursin("SLP", v)) && occursin("SQP", v), all_variants)
     tp_sqp   = filter(v -> occursin("2P", v) && occursin("SQP", v), all_variants)
 
     best_unif_sqp  = get_best_in_class(unif_sqp, summary)
