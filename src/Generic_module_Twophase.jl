@@ -98,8 +98,15 @@ function solve_restoration_subproblem!(model::JuMP.Model, problem::OptimizationP
     # Update bounds: max(xl-z, -δ) ≤ d ≤ min(xu-z, δ)
     for i in 1:n
         d_val = get_δ(δ, i)
-        lb = max(problem.xl[i] - z[i], -d_val)
-        ub = min(problem.xu[i] - z[i], d_val)
+        d_val = isfinite(d_val) ? d_val : 0.1
+        zi = isfinite(z[i]) ? z[i] : 0.0
+        lx = isfinite(problem.xl[i]) ? (problem.xl[i] - zi) : -Inf
+        ux = isfinite(problem.xu[i]) ? (problem.xu[i] - zi) : Inf
+        lb = max(lx, -d_val)
+        ub = min(ux, d_val)
+        lb = isfinite(lb) ? lb : -d_val
+        ub = isfinite(ub) ? ub : d_val
+        if lb > ub; lb = ub; end
         set_lower_bound(d[i], lb)
         set_upper_bound(d[i], ub)
     end
@@ -325,10 +332,17 @@ function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::T, proble
 
     @inbounds for i in 1:n
         d_val = get_δ(i) # Uses the helper to handle Scalar vs Vector
-        lx = problem.xl[i] - buffers.x_temp[i]
-        ux = problem.xu[i] - buffers.x_temp[i]
-        set_lower_bound(s[i], max(lx, -d_val))
-        set_upper_bound(s[i], min(ux, d_val))
+        d_val = isfinite(d_val) ? d_val : params.δmin
+        xi = isfinite(buffers.x_temp[i]) ? buffers.x_temp[i] : 0.0
+        lx = isfinite(problem.xl[i]) ? (problem.xl[i] - xi) : -Inf
+        ux = isfinite(problem.xu[i]) ? (problem.xu[i] - xi) : Inf
+        lb = max(lx, -d_val)
+        ub = min(ux, d_val)
+        lb = isfinite(lb) ? lb : -d_val
+        ub = isfinite(ub) ? ub : d_val
+        if lb > ub; lb = ub; end
+        set_lower_bound(s[i], lb)
+        set_upper_bound(s[i], ub)
     end
 
     if params.use_quadratic
@@ -837,6 +851,12 @@ function two_phase_optimization(
         end
         # Main loop (Algorithm 4.3)
         while iter < max_outer_iter
+            if any(!isfinite, x)
+                if verbose || logio !== nothing
+                    log_message!("❌ BREAKDOWN: Non-finite value (NaN/Inf) detected in x vector", logio; verbose=verbose)
+                end
+                return x, λ, θ, iter, 4, history ? x_hist[1:(iter + 1)] : nothing, full_log
+            end
             
             # --- Convergence checking ---
             if params.use_unif_stopping

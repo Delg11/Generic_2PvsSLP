@@ -156,19 +156,33 @@ function solve_main_problem_job(prob_name::String, tp_vars, un_vars, run_tp::Boo
 
         if run_tp
             for var in tp_vars
-                exec_time = @elapsed begin
-                    y, λ, θ, iter, status, hist, log = Generic_module_Twophase.two_phase_optimization(problem, x0, var.params; history=false)
+                try
+                    exec_time = @elapsed begin
+                        y, λ, θ, iter, status, hist, log = Generic_module_Twophase.two_phase_optimization(problem, x0, var.params; history=false)
+                    end
+                    fy = try problem.f(y) catch; NaN end
+                    hy = try norm(problem.h(y)) catch; NaN end
+                    push!(tp_rows, (prob_name, dim, ncon, var.name, var.SAR, var.M, var.PH, var.ATR, var.RRU, get_status_name(status), iter, exec_time * 1000.0, isfinite(fy) ? fy : NaN, isfinite(hy) ? hy : NaN, var.is_base))
+                catch e_var
+                    println("⚠️ Worker $(myid()) exception in TwoPhase $prob_name ($(var.name)): $e_var")
+                    push!(tp_rows, (prob_name, dim, ncon, var.name, var.SAR, var.M, var.PH, var.ATR, var.RRU, "ERROR", 0, 0.0, NaN, NaN, var.is_base))
                 end
-                push!(tp_rows, (prob_name, dim, ncon, var.name, var.SAR, var.M, var.PH, var.ATR, var.RRU, get_status_name(status), iter, exec_time * 1000.0, problem.f(y), norm(problem.h(y)), var.is_base))
             end
         end
 
         if run_un
             for var in un_vars
-                exec_time = @elapsed begin
-                    y, λ, θ, iter, status, hist, log = Generic_module_unif.solve_unif_trust_region(problem, x0, var.params)
+                try
+                    exec_time = @elapsed begin
+                        y, λ, θ, iter, status, hist, log = Generic_module_unif.solve_unif_trust_region(problem, x0, var.params)
+                    end
+                    fy = try problem.f(y) catch; NaN end
+                    hy = try norm(problem.h(y)) catch; NaN end
+                    push!(unif_rows, (prob_name, dim, ncon, var.name, var.SAR, var.PH, var.ATR, get_status_name(status), iter, exec_time * 1000.0, isfinite(fy) ? fy : NaN, isfinite(hy) ? hy : NaN, var.is_base))
+                catch e_var
+                    println("⚠️ Worker $(myid()) exception in UNIF $prob_name ($(var.name)): $e_var")
+                    push!(unif_rows, (prob_name, dim, ncon, var.name, var.SAR, var.PH, var.ATR, "ERROR", 0, 0.0, NaN, NaN, var.is_base))
                 end
-                push!(unif_rows, (prob_name, dim, ncon, var.name, var.SAR, var.PH, var.ATR, get_status_name(status), iter, exec_time * 1000.0, problem.f(y), norm(problem.h(y)), var.is_base))
             end
         end
     catch e

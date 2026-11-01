@@ -39,6 +39,10 @@ function parse_commandline()
             help = "Maximum number of constraints (-1 for no limit)."
             arg_type = Int
             default = -1
+        "--max-iter", "-i"
+            help = "Maximum outer iterations per variant (default: 2000)."
+            arg_type = Int
+            default = 2000
         "--run-unif"
             help = "Run UNIF variants (true/false)."
             arg_type = Bool
@@ -147,7 +151,7 @@ println("-" ^ 80)
 const RUN_TWOPHASE = args["run-twophase"]
 const RUN_UNIF     = args["run-unif"]
 
-common_max_iter = 5000
+common_max_iter = args["max-iter"]
 common_delta0   = 0.1
 common_tolG     = 1e-3
 common_tolF     = 5e-2
@@ -387,23 +391,35 @@ function main()
                 RUN_TWOPHASE && CSV.write(joinpath(results_dir, "partial_backup_twophase.csv"), df_twophase)
                 RUN_UNIF && CSV.write(joinpath(results_dir, "partial_backup_unif.csv"), df_unif)
             else
-                # Problem-level parallelization: 1 problem per job (minimizes CUTEst model load overhead)
-                println("⚡ Distributing $(length(problems)) problem batches across $(nworkers()) workers...")
-                results = pmap(p -> solve_main_problem_job(p, twophase_variants, unif_variants, RUN_TWOPHASE, RUN_UNIF, false), problems)
+                # Problem-level parallelization: Real-time streaming across workers
+                total_probs = length(problems)
+                println("⚡ Distributing $total_probs problem batches across $(nworkers()) workers (Real-Time Streaming)...")
+                progress_lock = ReentrantLock()
+                completed_count = 0
+                pool = default_worker_pool()
 
-                for (prob_name, (tp_rows, unif_rows)) in zip(problems, results)
-                    println("\n📦 Finished problem: $prob_name")
-                    for r in tp_rows
-                        push!(df_twophase, (r[1], git_commit_short, r[2:end]...))
-                        println("  [Two-Phase] > $(r[4])... $(r[10]) in $(round(r[12], digits=1))ms")
+                asyncmap(problems; ntasks=nworkers()) do p
+                    t_p_start = time()
+                    (tp_rows, unif_rows) = remotecall_fetch(solve_main_problem_job, pool, p, twophase_variants, unif_variants, RUN_TWOPHASE, RUN_UNIF, false)
+                    t_p_elapsed = time() - t_p_start
+                    
+                    lock(progress_lock) do
+                        completed_count += 1
+                        for r in tp_rows
+                            push!(df_twophase, (r[1], git_commit_short, r[2:end]...))
+                        end
+                        for r in unif_rows
+                            push!(df_unif, (r[1], git_commit_short, r[2:end]...))
+                        end
+
+                        @printf("  [%3d/%3d] ✅ Concluído: %-12s em %6.1fs | TwoPhase: %2d, UNIF: %2d\n", 
+                                completed_count, total_probs, p, t_p_elapsed, length(tp_rows), length(unif_rows))
+
+                        # Incremental backups saved on disk immediately after each problem finishes!
+                        RUN_TWOPHASE && CSV.write(joinpath(results_dir, "partial_backup_twophase.csv"), df_twophase)
+                        RUN_UNIF && CSV.write(joinpath(results_dir, "partial_backup_unif.csv"), df_unif)
                     end
-                    for r in unif_rows
-                        push!(df_unif, (r[1], git_commit_short, r[2:end]...))
-                        println("  [UNIF] > $(r[4])... $(r[8]) in $(round(r[10], digits=1))ms")
-                    end
-                    # Incremental backups
-                    RUN_TWOPHASE && CSV.write(joinpath(results_dir, "partial_backup_twophase.csv"), df_twophase)
-                    RUN_UNIF && CSV.write(joinpath(results_dir, "partial_backup_unif.csv"), df_unif)
+                    return nothing
                 end
             end
         end

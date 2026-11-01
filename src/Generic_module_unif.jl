@@ -124,6 +124,10 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
     end
 
     while ((countG < params_unif.maxcount || countF < params_unif.maxcount) && (countS < params_unif.maxcount) && (iter < params_unif.maxiter))
+        if any(!isfinite, x)
+            params_unif.debugverbose && println("❌ [DEBUG-UNIF] Breakdown: NaN/Inf detected in x vector.")
+            return x, lambda, theta, iter, 4, history ? x_hist[1:(iter+1)] : nothing, full_log
+        end
 
         params_unif.debugverbose && println("\n🔍 [DEBUG-UNIF] === Iteration $(iter+1) started ===")
         params_unif.debugverbose && println("🔍 [DEBUG-UNIF] Current State: F(x) = $F, aredfsb = $feas_violation, delta = $delta")
@@ -142,8 +146,20 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
         end
 
         # Box Constraints Trust Region
-        sL = max.(prob.xl .- x, -delta)
-        sU = min.(prob.xu .- x, delta)
+        sL = zeros(n)
+        sU = zeros(n)
+        for i in 1:n
+            d_val = (delta isa Vector) ? delta[i] : delta
+            d_val = isfinite(d_val) ? d_val : params_unif.delta0
+            xi = isfinite(x[i]) ? x[i] : 0.0
+            lx = isfinite(prob.xl[i]) ? (prob.xl[i] - xi) : -Inf
+            ux = isfinite(prob.xu[i]) ? (prob.xu[i] - xi) : Inf
+            lb = max(lx, -d_val)
+            ub = min(ux, d_val)
+            sL[i] = isfinite(lb) ? lb : -d_val
+            sU[i] = isfinite(ub) ? ub : d_val
+            if sL[i] > sU[i]; sL[i] = sU[i]; end
+        end
 
         s_sol = zeros(n)
         lp_obj_val = 0.0
@@ -227,9 +243,19 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
             params_unif.debugverbose && println("⚠️ [DEBUG-UNIF] Subproblem infeasible/failed. Entering RESTORATION phase.")
             
             current_phase = :restoration
-            sL2 = max.(prob.xl .- x, -0.8 .* delta)
-            sU2 = min.(prob.xu .- x, 0.8 .* delta)
+            sL2 = zeros(n)
+            sU2 = zeros(n)
             for i in 1:n
+                d_val = (delta isa Vector) ? 0.8 * delta[i] : 0.8 * delta
+                d_val = isfinite(d_val) ? d_val : 0.8 * params_unif.delta0
+                xi = isfinite(x[i]) ? x[i] : 0.0
+                lx = isfinite(prob.xl[i]) ? (prob.xl[i] - xi) : -Inf
+                ux = isfinite(prob.xu[i]) ? (prob.xu[i] - xi) : Inf
+                lb = max(lx, -d_val)
+                ub = min(ux, d_val)
+                sL2[i] = isfinite(lb) ? lb : -d_val
+                sU2[i] = isfinite(ub) ? ub : d_val
+                if sL2[i] > sU2[i]; sL2[i] = sU2[i]; end
                 set_lower_bound(s2[i], sL2[i])
                 set_upper_bound(s2[i], sU2[i])
             end
