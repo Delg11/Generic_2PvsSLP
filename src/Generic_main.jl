@@ -95,14 +95,21 @@ function parse_commandline()
             help = "SQP strategies for UNIF. Comma-separated (e.g., none,identity,spectral,exact) or 'all'."
             arg_type = String
             default = "none"
+        "--qp-solver"
+            help = "Quadratic programming solver for SQP subproblems: 'gurobi' (default) or 'ripqp'."
+            arg_type = String
+            default = "gurobi"
     end
 
     return parse_args(s)
 end
 
 function parse_sqp_args(arg_str::String)
-    if lowercase(arg_str) == "all"
-        return [:exact, :identity, :spectral, :reciprocal, :exponential, :quasi_newton]
+    s = lowercase(strip(arg_str))
+    if s == "all"
+        return [:none, :exact, :diag_exact, :bfgs, :spectral, :identity, :quasi_newton, :reciprocal, :exponential]
+    elseif s == "quadratic" || s == "all_quadratic"
+        return [:exact, :diag_exact, :bfgs, :spectral, :identity, :quasi_newton, :reciprocal, :exponential]
     else
         return Symbol.(strip.(split(arg_str, ",")))
     end
@@ -155,7 +162,9 @@ mkpath(results_dir)
 println("📁 Results directory created: $results_dir")
 
 # --- BUILDER FUNCTIONS ---
-function build_twophase_params(sar, M, ph, atr, rru, use_quad, b_strat; atr_strat::Symbol=:legacy_parabolic)
+const QP_SOLVER_CHOICE = Symbol(args["qp-solver"])
+
+function build_twophase_params(sar, M, ph, atr, rru, use_quad, b_strat; atr_strat::Symbol=:legacy_parabolic, qp_solver::Symbol=QP_SOLVER_CHOICE)
     return SharedTypes.TwoPhaseParams(
         max_outer_iter = common_max_iter, δ0_opt = common_delta0, δ0_resto = common_delta0,
         tolG = common_tolG, tolF = common_tolF, tolS = common_tolS, maxcount = common_maxcount,
@@ -164,17 +173,17 @@ function build_twophase_params(sar, M, ph, atr, rru, use_quad, b_strat; atr_stra
         θ0 = 0.90, αΦ = 1e-8, max_iter_resto = 500, verbose_in = common_verbose, debugverbose = false,
         strong_agreement_rule = sar, non_monotone_M = M, parabolic_heuristic = ph, anisotropic_trust_region = atr,
         atr_strategy = atr_strat, restoration_ratio_update = rru,
-        use_quadratic = use_quad, B_update_strategy = b_strat, quadratic_solver = :ripqp
+        use_quadratic = use_quad, B_update_strategy = b_strat, quadratic_solver = qp_solver
     )
 end
 
-function build_unif_params(sar, ph, atr, use_quad, b_strat; atr_strat::Symbol=:legacy_parabolic)
+function build_unif_params(sar, ph, atr, use_quad, b_strat; atr_strat::Symbol=:legacy_parabolic, qp_solver::Symbol=QP_SOLVER_CHOICE)
     return SharedTypes.UNIFParams(
         delta0 = common_delta0, tolG = common_tolG, tolF = common_tolF, tolS = common_tolS,
         maxiter = common_max_iter, maxcount = common_maxcount, verbose = common_verbose,
         verbose_out = common_verbose, debugverbose = false, parabolic_heuristic = ph, anisotropic_trust_region = atr,
         atr_strategy = atr_strat,
-        strong_agreement_rule = sar, use_quadratic = use_quad, B_update_strategy = b_strat, quadratic_solver = :ripqp
+        strong_agreement_rule = sar, use_quadratic = use_quad, B_update_strategy = b_strat, quadratic_solver = qp_solver
     )
 end
 

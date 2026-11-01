@@ -1,26 +1,14 @@
-module visualizar_frames_3plotsModule
+module Generic_Visualization
 
-export visualizar_frames_3plots, visualizar_frames_dinamicos
+export visualizar_frames_3plots, visualizar_frames_dinamicos, visualize_optimization
 
 # ==============================================================================
-# EXEMPLOS DE USO
+# VISUALIZAÇÃO E ANIMAÇÃO DE OTIMIZAÇÃO (GENERIC VISUALIZATION)
 # ==============================================================================
-
-# 1. Apenas plota e gera os PNGs na pasta (sem vídeo):
-# visualizar_frames_3plots(problem, full_log, save_video=false, save_frames=true)
-
-# 2. Gera frames apenas para as últimas 10 iterações (ótimo para analisar a convergência final):
-# visualizar_frames_3plots(problem, last(full_log, 10), save_video=false, save_frames=true)
-
-# 3. Gera frames pulando a cada 1000 passos (ótimo para históricos muito longos):
-# visualizar_frames_3plots(problem, full_log[begin:1000:end], save_video=false, save_frames=true)
-
-# 4. Apenas gera um MP4 silencioso (sem salvar as dezenas de imagens soltas na pasta):
-# visualizar_frames_3plots(problem, full_log, save_frames=false, save_video=true, add_audio=false)
-
-# 5. Gera o pacote completo (frames + vídeo ÉPICO com a música do Interstellar):
-# caminho_musica = raw"C:\Users\gdelg\OneDrive\Documentos\GitHub\TopPT-SLP-Codigo-Limpo\Interstellar (Main Theme Piano) - Gacabe & Jecabe.mp3"
-# visualizar_frames_3plots(problem, full_log, save_frames=true, save_video=true, add_audio=true, audio_path=caminho_musica)
+# Módulo de alta performance para renderizar frames e vídeos 2D / 1D de
+# algoritmos de otimização (Two-Phase e UNIF) com suporte avançado a regiões
+# de confiança anisotrópicas (ATR), cortes 1D exatos e compilação direta via FFMPEG.
+# ==============================================================================
 
 using Dates
 using LinearAlgebra
@@ -28,362 +16,583 @@ using Plots
 using Printf
 using FFMPEG
 
-const OUTPUT_DIR_DEFAULT = "frames"
+const DEFAULT_OUTPUT_ROOT = "Outputs_Otimizacao"
 
 # ==============================================================================
-# FUNÇÕES AUXILIARES GERAIS
+# FUNÇÕES AUXILIARES MATEMÁTICAS E DE RENDERIZAÇÃO
 # ==============================================================================
 
 """
-Gera um vetor de níveis que inclui obrigatoriamente os valores de f(x) visitados,
-preenchendo os espaços vazios com intermediários logarítmicos.
+    _extrair_delta(step) -> (Float64, Float64, Float64)
+
+Extrai os componentes de raio da região de confiança (dx, dy) e o valor escalar representativo.
+Compatível com raios escalares e vetoriais anisotrópicos (ATR).
 """
-function gerar_niveis_inteligentes(prob, full_log; densidade=2)
-    z_values = Float64[0.1] # Fundo do vale
-    
-    for step in full_log
-        push!(z_values, prob.f(step.x_from), prob.f(step.x_to))
-    end
-    append!(z_values, [1e4, 1e5, 1e6]) # Paredes
-    
-    sort!(z_values)
-    unique_z = Float64[z_values[1]]
-    
-    for v in z_values[2:end]
-        if v > unique_z[end] * 1.01
-            push!(unique_z, v)
+function _extrair_delta(step)
+    if hasproperty(step, :delta)
+        d = step.delta
+        if d isa AbstractVector
+            n = length(d)
+            dx = n >= 1 ? Float64(d[1]) : 0.1
+            dy = n >= 2 ? Float64(d[2]) : dx
+            return dx, dy, Float64(maximum(d))
+        elseif d isa Real
+            val = Float64(d)
+            return val, val, val
         end
     end
-    
-    niveis_finais = Float64[]
-    for i in 1:(length(unique_z) - 1)
-        a, b = unique_z[i], unique_z[i + 1]
-        push!(niveis_finais, a)
-        
-        if b > a * 2.0 && a > 1e-6
-            range_logs = range(log10(a), log10(b); length=densidade+2)
-            for k in 2:(length(range_logs) - 1)
-                push!(niveis_finais, 10.0 ^ range_logs[k])
-            end
-        end
-    end
-    push!(niveis_finais, unique_z[end])
-    return niveis_finais
+    return 0.1, 0.1, 0.1
 end
 
-function _definir_estilo_passo(phase, status)
+"""
+    _calcular_fronteira_atr(delta_x::Float64, delta_y::Float64, d::AbstractVector{<:Real}) -> Float64
+
+Calcula a distância exata ao longo da direção unitária `d` até a fronteira da
+caixa anisotrópica [-delta_x, delta_x] × [-delta_y, delta_y]:
+    t_box = min( delta_x / |d_x|, delta_y / |d_y| )
+"""
+function _calcular_fronteira_atr(delta_x::Float64, delta_y::Float64, d::AbstractVector{<:Real})
+    dx_abs = abs(d[1]) + 1e-12
+    dy_abs = abs(d[2]) + 1e-12
+    return min(delta_x / dx_abs, delta_y / dy_abs)
+end
+
+"""
+    gerar_niveis_inteligentes(prob, full_log; densidade=2) -> Vector{Float64}
+
+Gera níveis de contorno que cobrem as bacias e valores de f(x) visitados pela trajetória,
+robusto para funções com valores positivos, negativos ou nulos.
+"""
+function gerar_niveis_inteligentes(prob, full_log; densidade=2)
+    z_vals = Float64[]
+    for step in full_log
+        push!(z_vals, Float64(prob.f(step.x_from)))
+        push!(z_vals, Float64(prob.f(step.x_to)))
+    end
+
+    if isempty(z_vals)
+        return collect(range(0.0, 100.0, length=20))
+    end
+
+    z_min = minimum(z_vals)
+    z_max = maximum(z_vals)
+    
+    # Se os valores forem todos positivos e cobrirem ordens de grandeza
+    if z_min > 1e-4 && (z_max / z_min > 10.0)
+        sort!(z_vals)
+        unique_z = Float64[z_vals[1]]
+        for v in z_vals[2:end]
+            if v > unique_z[end] * 1.05
+                push!(unique_z, v)
+            end
+        end
+        push!(unique_z, z_max * 1.5, z_max * 5.0)
+
+        niveis = Float64[]
+        for i in 1:(length(unique_z) - 1)
+            a, b = unique_z[i], unique_z[i + 1]
+            push!(niveis, a)
+            if b > a * 2.0 && a > 1e-6
+                r_log = range(log10(a), log10(b); length=densidade + 2)
+                for k in 2:(length(r_log) - 1)
+                    push!(niveis, 10.0 ^ r_log[k])
+                end
+            end
+        end
+        push!(niveis, unique_z[end])
+        return unique(sort(niveis))
+    else
+        # Escala linear/híbrida para problemas gerais ou negativos
+        margem = max(abs(z_max - z_min) * 0.1, 1.0)
+        return collect(range(z_min - margem * 0.2, z_max + margem, length=25))
+    end
+end
+
+"""
+    _definir_estilo_passo(phase::Symbol, status::Symbol) -> (Symbol, String, Symbol, Int)
+
+Retorna a tupla de estilo visual: (cor, rotulo, forma_marcador, tamanho_marcador).
+"""
+function _definir_estilo_passo(phase::Symbol, status::Symbol)
     if phase == :restoration
         cor = (status == :accepted) ? :magenta : :purple
         lbl = (status == :accepted) ? "RESTAURAÇÃO (Aceito)" : "RESTAURAÇÃO (Rej.)"
         frm = (status == :accepted) ? :diamond : :x
-        ms  = (status == :accepted) ? 10 : 8
+        ms  = (status == :accepted) ? 9 : 7
     else
         cor = (status == :accepted) ? :green : :red
         lbl = (status == :accepted) ? "OTIMIZAÇÃO (Aceito)" : "OTIMIZAÇÃO (Rej.)"
         frm = (status == :accepted) ? :circle : :x
-        ms  = 8
+        ms  = (status == :accepted) ? 8 : 7
     end
     return cor, lbl, frm, ms
 end
 
-function _extrair_delta(step)
-    if step.delta isa Vector
-        return step.delta[1], step.delta[2], maximum(step.delta)
+"""
+    _calcular_bounding_box_global(full_log) -> Dict{Symbol, Float64}
+
+Pré-calcula a caixa delimitadora global estática da trajetória e de todas as caixas de confiança.
+Garante que a malha global seja calculada UMA ÚNICA VEZ para todos os frames.
+"""
+function _calcular_bounding_box_global(full_log)
+    min_x, max_x = Inf, -Inf
+    min_y, max_y = Inf, -Inf
+
+    for step in full_log
+        dx, dy, _ = _extrair_delta(step)
+        for pt in (step.x_from, step.x_to)
+            min_x = min(min_x, pt[1] - dx, pt[1] + dx)
+            max_x = max(max_x, pt[1] - dx, pt[1] + dx)
+            min_y = min(min_y, pt[2] - dy, pt[2] + dy)
+            max_y = max(max_y, pt[2] - dy, pt[2] + dy)
+        end
     end
-    return step.delta, step.delta, step.delta
+
+    if !isfinite(min_x)
+        min_x, max_x, min_y, max_y = -2.0, 2.0, -2.0, 2.0
+    end
+
+    span_x = max(max_x - min_x, 0.5)
+    span_y = max(max_y - min_y, 0.5)
+
+    return Dict(
+        :min_x => min_x - span_x * 0.15,
+        :max_x => max_x + span_x * 0.15,
+        :min_y => min_y - span_y * 0.15,
+        :max_y => max_y + span_y * 0.15
+    )
 end
 
-function _atualizar_limites!(limites, trajetoria_x, trajetoria_y, cx, cy, dest_x, dest_y, dx, dy)
-    pontos_x = [cx, dest_x, cx - dx, cx + dx]
-    pontos_y = [cy, dest_y, cy - dy, cy + dy]
-    
-    limites[:min_x] = min(limites[:min_x], minimum(trajetoria_x; init=Inf), minimum(pontos_x))
-    limites[:max_x] = max(limites[:max_x], maximum(trajetoria_x; init=-Inf), maximum(pontos_x))
-    limites[:min_y] = min(limites[:min_y], minimum(trajetoria_y; init=Inf), minimum(pontos_y))
-    limites[:max_y] = max(limites[:max_y], maximum(trajetoria_y; init=-Inf), maximum(pontos_y))
+"""
+    _avaliar_malha_2d(f, xs, ys) -> Matrix{Float64}
+
+Avalia uma função f([x, y]) em uma grade 2D sem alocações no loop interno.
+"""
+function _avaliar_malha_2d(f, xs, ys)
+    Z = Matrix{Float64}(undef, length(ys), length(xs))
+    buf = [0.0, 0.0]
+    for (j, x) in enumerate(xs)
+        buf[1] = x
+        for (k, y) in enumerate(ys)
+            buf[2] = y
+            Z[k, j] = Float64(f(buf))
+        end
+    end
+    return Z
 end
 
 # ==============================================================================
-# PLOTAGENS ESPECÍFICAS
+# RENDERIZADORES DE CENÁRIO (GLOBAL E ZOOM)
 # ==============================================================================
 
-function _montar_cenario_2d(tipo_visao, prob, step, full_log, trajetoria_x, trajetoria_y, 
-                            meus_niveis, limites_globais, params_passo)
-    
-    cx, cy, dest_x, dest_y = params_passo.cx, params_passo.cy, params_passo.dest_x, params_passo.dest_y
-    dx, dy, d_scalar = params_passo.dx, params_passo.dy, params_passo.d_scalar
+function _montar_cenario_global_2d(prob, meus_niveis, xs_glob, ys_glob, Z_glob, restricoes_glob,
+                                   trajetoria_x, trajetoria_y, rej_x, rej_y, rej_pts_x, rej_pts_y,
+                                   params_passo)
+    cx, cy = params_passo.cx, params_passo.cy
+    dest_x, dest_y = params_passo.dest_x, params_passo.dest_y
+    dx, dy = params_passo.dx, params_passo.dy
     cor_passo, forma_passo, ms_passo = params_passo.cor, params_passo.forma, params_passo.ms
     is_final = params_passo.is_final
     grad_curr = params_passo.grad_curr
 
-    # 1. Determina Limites da Câmera
-    if tipo_visao == :global
-        vx_min, vx_max = limites_globais[:min_x], limites_globais[:max_x]
-        vy_min, vy_max = limites_globais[:min_y], limites_globais[:max_y]
-        mostrar_rastro = true
-    else
-        max_span = max(d_scalar, norm([dest_x, dest_y] - [cx, cy], Inf)) * 1.2
-        vx_min, vx_max = cx - max_span, cx + max_span
-        vy_min, vy_max = cy - max_span, cy + max_span
-        mostrar_rastro = false
+    xlims = (xs_glob[1], xs_glob[end])
+    ylims = (ys_glob[1], ys_glob[end])
+
+    # 1. Base pré-avaliada de contornos (zero re-cálculo)
+    p = contour(xs_glob, ys_glob, Z_glob; levels=meus_niveis, fill=true, c=:viridis, 
+                alpha=0.45, legend=false, xlims=xlims, ylims=ylims, framestyle=:box, aspect_ratio=:equal)
+
+    # 2. Restrições globais pré-calculadas
+    for Z_c in restricoes_glob
+        contour!(p, xs_glob, ys_glob, Z_c; levels=[0.0], c=:cyan, lw=2.5, alpha=0.9)
     end
 
-    span_x, span_y = max(vx_max - vx_min, 0.1), max(vy_max - vy_min, 0.1)
-    xlims = (vx_min - span_x*0.1, vx_max + span_x*0.1)
-    ylims = (vy_min - span_y*0.1, vy_max + span_y*0.1)
-    grid_dens = max(span_x, span_y) / 100.0
-
-    # 2. Contour Plot Base
-    p = contour(xlims[1]:grid_dens:xlims[2], ylims[1]:grid_dens:ylims[2], (x, y) -> prob.f([x, y]); 
-                levels=meus_niveis, fill=true, c=:viridis, alpha=0.5, legend=false, 
-                xlims=xlims, ylims=ylims, framestyle=:box, aspect_ratio=:equal)
-
-    # 3. Restrições
-    if hasproperty(prob, :h)
-        h_test = prob.h([cx, cy])
-        num_restricoes = length(h_test)
-        for k in 1:num_restricoes
-            contour!(p, xlims[1]:grid_dens:xlims[2], ylims[1]:grid_dens:ylims[2], 
-                     (x, y) -> prob.h([x, y])[k]; levels=[0.0], c=:cyan, lw=3, alpha=0.9)
-        end
+    # 3. Rastro de passos rejeitados passados (vetorizado com NaN)
+    if !isempty(rej_x)
+        plot!(p, rej_x, rej_y; c=:red, alpha=0.35, style=:dot, lw=1.0, label="")
+        scatter!(p, rej_pts_x, rej_pts_y; c=:red, alpha=0.35, shape=:x, ms=4, label="")
     end
 
-    # 4. Rastro (Histórico)
-    if mostrar_rastro
-        lim_k = is_final ? length(full_log) : (params_passo.i - 1)
-        for k in 1:lim_k
-            old = full_log[k]
-            if old.status != :accepted && old.phase == :optimization
-                plot!(p, [old.x_from[1], old.x_to[1]], [old.x_from[2], old.x_to[2]]; c=:red, alpha=0.3, style=:dot)
-                scatter!(p, [old.x_to[1]], [old.x_to[2]]; c=:red, alpha=0.3, shape=:x, ms=4)
-            end
-        end
-        if length(trajetoria_x) > 1
-            plot!(p, trajetoria_x, trajetoria_y; c=:black, alpha=0.6, lw=1.5)
-            scatter!(p, trajetoria_x, trajetoria_y; c=:black, alpha=0.6, ms=3)
-        end
+    # 4. Trajetória aceita (vetorizada)
+    if length(trajetoria_x) > 1
+        plot!(p, trajetoria_x, trajetoria_y; c=:black, alpha=0.75, lw=1.5, label="")
+        scatter!(p, trajetoria_x, trajetoria_y; c=:black, alpha=0.75, ms=3, label="")
     end
 
-    # 5. Passo Atual
-    plot!(p, [cx-dx, cx+dx, cx+dx, cx-dx, cx-dx], [cy-dy, cy-dy, cy+dy, cy+dy, cy-dy]; c=:blue, style=:dash, lw=2.0)
-    
+    # 5. Caixa da Região de Confiança Atual (Anisotrópica)
+    box_x = [cx - dx, cx + dx, cx + dx, cx - dx, cx - dx]
+    box_y = [cy - dy, cy - dy, cy + dy, cy + dy, cy - dy]
+    plot!(p, box_x, box_y; c=:blue, style=:dash, lw=2.0, label="")
+
+    # 6. Passo Atual
     if !is_final
-        plot!(p, [cx, dest_x], [cy, dest_y]; c=cor_passo, arrow=true, lw=3)
-        scatter!(p, [cx], [cy]; c=:blue, ms=7)
+        plot!(p, [cx, dest_x], [cy, dest_y]; c=cor_passo, arrow=true, lw=2.5, label="")
+        scatter!(p, [cx], [cy]; c=:blue, ms=6, label="")
     end
-    scatter!(p, [dest_x], [dest_y]; c=cor_passo, shape=forma_passo, ms=ms_passo)
+    scatter!(p, [dest_x], [dest_y]; c=cor_passo, shape=forma_passo, ms=ms_passo, label="")
 
-    # 6. Gradiente
+    # 7. Vetor Gradiente Negativo (direção de descida clássica)
     norm_g = norm(grad_curr)
     if norm_g > 1e-8
-        scale_grad = max(span_x, span_y) * 0.15
-        v_curr = (grad_curr ./ norm_g) * scale_grad
-        plot!(p, [cx, cx + v_curr[1]], [cy, cy + v_curr[2]]; c=:magenta, arrow=true, lw=2)
+        span_diag = max(xlims[2] - xlims[1], ylims[2] - ylims[1])
+        v_curr = (-grad_curr ./ norm_g) * (span_diag * 0.12)
+        plot!(p, [cx, cx + v_curr[1]], [cy, cy + v_curr[2]]; c=:magenta, arrow=true, lw=2.0, label="")
     end
 
-    title!(p, tipo_visao == :global ? "Visão Global (Histórico)" : "Zoom Local (Iteração)")
+    title!(p, "Visão Global (Histórico Completo)")
+    return p
+end
+
+function _montar_cenario_local_2d(prob, meus_niveis, params_passo; grid_pts=60)
+    cx, cy = params_passo.cx, params_passo.cy
+    dest_x, dest_y = params_passo.dest_x, params_passo.dest_y
+    dx, dy = params_passo.dx, params_passo.dy
+    cor_passo, forma_passo, ms_passo = params_passo.cor, params_passo.forma, params_passo.ms
+    is_final = params_passo.is_final
+    grad_curr = params_passo.grad_curr
+
+    # Enquadramento inteligente ao redor do ponto e da caixa ATR
+    step_span = norm([dest_x - cx, dest_y - cy], Inf)
+    max_span = max(dx, dy, step_span, 1e-3) * 1.6
+    xlims = (cx - max_span, cx + max_span)
+    ylims = (cy - max_span, cy + max_span)
+
+    xs_loc = range(xlims[1], xlims[2], length=grid_pts)
+    ys_loc = range(ylims[1], ylims[2], length=grid_pts)
+    Z_loc = _avaliar_malha_2d(prob.f, xs_loc, ys_loc)
+
+    p = contour(xs_loc, ys_loc, Z_loc; levels=meus_niveis, fill=true, c=:viridis, 
+                alpha=0.45, legend=false, xlims=xlims, ylims=ylims, framestyle=:box, aspect_ratio=:equal)
+
+    # Restrições locais
+    if hasproperty(prob, :h)
+        for k in 1:prob.ncon
+            Z_con = _avaliar_malha_2d((x) -> prob.h(x)[k], xs_loc, ys_loc)
+            contour!(p, xs_loc, ys_loc, Z_con; levels=[0.0], c=:cyan, lw=2.5, alpha=0.9)
+        end
+    end
+
+    # Caixa ATR no Zoom Local
+    box_x = [cx - dx, cx + dx, cx + dx, cx - dx, cx - dx]
+    box_y = [cy - dy, cy - dy, cy + dy, cy + dy, cy - dy]
+    plot!(p, box_x, box_y; c=:blue, style=:dash, lw=2.2, label="")
+
+    # Passo e Pontos
+    if !is_final
+        plot!(p, [cx, dest_x], [cy, dest_y]; c=cor_passo, arrow=true, lw=2.8, label="")
+        scatter!(p, [cx], [cy]; c=:blue, ms=7, label="")
+    end
+    scatter!(p, [dest_x], [dest_y]; c=cor_passo, shape=forma_passo, ms=ms_passo, label="")
+
+    # Gradiente negativo local
+    norm_g = norm(grad_curr)
+    if norm_g > 1e-8
+        v_curr = (-grad_curr ./ norm_g) * (max_span * 0.45)
+        plot!(p, [cx, cx + v_curr[1]], [cy, cy + v_curr[2]]; c=:magenta, arrow=true, lw=2.2, label="")
+    end
+
+    title!(p, "Zoom Local (Região de Confiança)")
     return p
 end
 
 # ==============================================================================
-# FUNÇÕES PRINCIPAIS (EXPORTADAS)
+# FUNÇÕES PRINCIPAIS EXPORTADAS
 # ==============================================================================
 
 """
-Gera frames da otimização com diferentes modos de visualização:
-- `mode=:history` : Visão Global com rastro completo.
-- `mode=:zoom`    : Visão Local focada na iteração atual.
-- `mode=:combined`: Lado a lado (Global + Zoom).
-"""
-function visualizar_frames_dinamicos(prob, full_log; mode::Symbol=:combined)
-    rm(OUTPUT_DIR_DEFAULT; recursive=true, force=true)
-    mkpath(OUTPUT_DIR_DEFAULT)
-    println("\n🎥 Renderizando frames dinâmicos (Modo: $mode)...")
+    visualizar_frames_3plots(prob, full_log; kwargs...)
 
-    meus_niveis = gerar_niveis_inteligentes(prob, full_log; densidade=3)
-    trajetoria_x, trajetoria_y = Float64[], Float64[]
-    limites_globais = Dict(:min_x => Inf, :max_x => -Inf, :min_y => Inf, :max_y => -Inf)
+Gera o painel completo de visualização composto por 4 subplots por iteração:
+1. Top-Left: Visão Global (histórico de aceitos/rejeitados e contornos globais pré-calculados).
+2. Top-Right: Zoom Local na iteração atual, exibindo o retângulo da caixa ATR e curvas de nível.
+3. Bottom-Left: Corte 1D na direção do gradiente/descida, com fronteira exata da caixa ATR.
+4. Bottom-Right: Corte 1D na direção do passo LP, exibindo o ponto destino e a fronteira da caixa.
 
-    if !isempty(full_log)
-        push!(trajetoria_x, full_log[1].x_from[1])
-        push!(trajetoria_y, full_log[1].x_from[2])
-    end
-
-    for (i, step) in enumerate(full_log)
-        cx, cy = step.x_from[1], step.x_from[2]
-        dest_x, dest_y = step.x_to[1], step.x_to[2]
-        dx, dy, d_scalar = _extrair_delta(step)
-        cor_passo, label_passo, forma_passo, ms_passo = _definir_estilo_passo(step.phase, step.status)
-
-        _atualizar_limites!(limites_globais, trajetoria_x, trajetoria_y, cx, cy, dest_x, dest_y, dx, dy)
-
-        params = (i=i, cx=cx, cy=cy, dest_x=dest_x, dest_y=dest_y, dx=dx, dy=dy, 
-                  d_scalar=d_scalar, cor=cor_passo, forma=forma_passo, ms=ms_passo, 
-                  is_final=false, grad_curr=prob.∇f(step.x_from))
-
-        plots_comb = []
-        if mode in [:history, :combined]; push!(plots_comb, _montar_cenario_2d(:global, prob, step, full_log, trajetoria_x, trajetoria_y, meus_niveis, limites_globais, params)); end
-        if mode in [:zoom, :combined];    push!(plots_comb, _montar_cenario_2d(:local, prob, step, full_log, trajetoria_x, trajetoria_y, meus_niveis, limites_globais, params)); end
-
-        final_size = mode == :combined ? (1200, 500) : (800, 600)
-        main_title = @sprintf("Iter %d | %s | %s\nLag: %.1e | Merit: %.1e | δ(max): %.1e\n\n", 
-                              step.iter, step.phase, uppercase(string(step.status)), step.Lagrange, step.Merit, d_scalar)
-
-        p_final = plot(plots_comb...; layout=(1, length(plots_comb)), size=final_size, plot_title=main_title, dpi=150, plot_titlevspan=0.15)
-        savefig(p_final, joinpath(OUTPUT_DIR_DEFAULT, @sprintf("frame_%04d.png", i)))
-
-        if step.status == :accepted
-            push!(trajetoria_x, dest_x)
-            push!(trajetoria_y, dest_y)
-        end
-        if i % 10 == 0; print("."); end
-    end
-    println("\n✅ Concluído!")
-end
-
-"""
-Gera 3 gráficos por iteração:
-1. Global (Histórico) | 2. Zoom | 3. Corte Gradiente | 4. Corte Passo
+# Opções principais:
+- `save_video::Bool=true`: Compila o vídeo em MP4 via FFMPEG.
+- `save_frames::Bool=true`: Salva os arquivos PNG individuais de cada frame.
+- `fps_video::Int=10`: Taxa de quadros do vídeo gerado.
+- `hold_time_sec::Int=3`: Tempo de pausa exibindo o frame final da convergência.
+- `algo_name::String=""`: Nome do algoritmo/variante para o título (ex: "UNIF (ATR: secant_box)").
+- `prob_name::String=""`: Nome do problema (ex: "ROSENBR").
 """
 function visualizar_frames_3plots(
-    prob, full_log; 
+    prob, full_log;
     mode::Symbol=:combined,
     save_frames::Bool=true,
     save_video::Bool=true,
     add_audio::Bool=false,
     audio_path::String="",
     hold_time_sec::Int=3,
-    fps_video::Int=5
+    fps_video::Int=10,
+    output_dir::String="",
+    video_name::String="",
+    algo_name::String="",
+    prob_name::String="",
+    grid_density::Int=60,
+    dpi::Int=120
 )
-    timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
-    RUN_DIR = joinpath("Outputs_Otimizacao", "run_$timestamp")
-    FRAMES_DIR = joinpath(RUN_DIR, "frames")
-    NOME_VIDEO_FINAL = joinpath(RUN_DIR, "otimizacao_output.mp4")
-
-    if save_frames || save_video; mkpath(FRAMES_DIR); end
-
-    println("\n🎥 Renderizando frames 3Plots (Modo: $mode)...")
-    anim = Animation()
-    meus_niveis = gerar_niveis_inteligentes(prob, full_log; densidade=3)
-
-    trajetoria_x, trajetoria_y = Float64[], Float64[]
-    limites_globais = Dict(:min_x => Inf, :max_x => -Inf, :min_y => Inf, :max_y => -Inf)
-
-    if !isempty(full_log)
-        push!(trajetoria_x, full_log[1].x_from[1])
-        push!(trajetoria_y, full_log[1].x_from[2])
+    if isempty(full_log)
+        println("⚠️ O log de passos está vazio. Nenhuma visualização gerada.")
+        return
     end
 
-    num_steps = length(full_log)
+    # Definição de diretórios
+    timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+    RUN_DIR = isempty(output_dir) ? joinpath(DEFAULT_OUTPUT_ROOT, "run_$timestamp") : output_dir
+    FRAMES_DIR = joinpath(RUN_DIR, "frames")
+    mkpath(FRAMES_DIR)
+
+    video_filename = isempty(video_name) ? "otimizacao_output.mp4" : video_name
+    if !endswith(video_filename, ".mp4")
+        video_filename *= ".mp4"
+    end
+    NOME_VIDEO_FINAL = joinpath(RUN_DIR, video_filename)
+
+    p_name = isempty(prob_name) ? (hasproperty(prob, :name) ? prob.name : "Problema") : prob_name
+    a_name = isempty(algo_name) ? "SLP" : algo_name
+
+    println("\n" * "="^80)
+    println("🎥 Renderizando Visualização Otimizada: $p_name | $a_name")
+    println("📁 Diretório: $RUN_DIR")
+    println("⚙️  Passos no log: $(length(full_log)) | FPS: $fps_video | Grid: $(grid_density)x$(grid_density)")
+    println("="^80)
+
+    # 1. Pré-cálculo da grade global e contornos estáticos (1 única avaliação!)
+    bbox = _calcular_bounding_box_global(full_log)
+    xs_glob = range(bbox[:min_x], bbox[:max_x], length=grid_density)
+    ys_glob = range(bbox[:min_y], bbox[:max_y], length=grid_density)
     
-    for i in 1:(num_steps + 1)
-        is_final = i > num_steps
+    print("🎨 Pré-calculando malha e contornos globais... ")
+    meus_niveis = gerar_niveis_inteligentes(prob, full_log; densidade=2)
+    Z_glob = _avaliar_malha_2d(prob.f, xs_glob, ys_glob)
+    
+    restricoes_glob = []
+    if hasproperty(prob, :h) && prob.ncon > 0
+        for k in 1:prob.ncon
+            push!(restricoes_glob, _avaliar_malha_2d((x) -> prob.h(x)[k], xs_glob, ys_glob))
+        end
+    end
+    println("OK")
+
+    # Arrays de trajetórias vetorizadas
+    trajetoria_x = Float64[full_log[1].x_from[1]]
+    trajetoria_y = Float64[full_log[1].x_from[2]]
+    rej_x = Float64[]
+    rej_y = Float64[]
+    rej_pts_x = Float64[]
+    rej_pts_y = Float64[]
+
+    num_steps = length(full_log)
+    total_frames = num_steps + 1
+
+    print("🖼️  Renderizando $(total_frames) frames ")
+
+    for i in 1:total_frames
+        is_final = (i > num_steps)
         step = is_final ? full_log[end] : full_log[i]
-        
-        # Configuração de Passo (Final vs Normal)
-# Configuração de Passo (Final vs Normal)
+
+        dx, dy, d_scalar = _extrair_delta(step)
+
         if is_final
-            # CORREÇÃO: Separar as atribuições de X e Y
-            cx = dest_x = step.x_to[1] 
+            cx = dest_x = step.x_to[1]
             cy = dest_y = step.x_to[2]
-            
-            dx, dy, d_scalar = _extrair_delta(step)
-            cor_passo, label_passo, forma_passo, ms_passo = :yellow, "PONTO FINAL", :star5, 12
-            grad_curr, f_curr = prob.∇f(step.x_to), prob.f(step.x_to)
+            cor_passo, label_passo, forma_passo, ms_passo = :yellow, "CONVERGÊNCIA FINAL", :star5, 12
+            grad_curr = prob.∇f(step.x_to)
+            f_curr = Float64(prob.f(step.x_to))
         else
             cx, cy = step.x_from[1], step.x_from[2]
             dest_x, dest_y = step.x_to[1], step.x_to[2]
-            dx, dy, d_scalar = _extrair_delta(step)
             cor_passo, label_passo, forma_passo, ms_passo = _definir_estilo_passo(step.phase, step.status)
-            grad_curr, f_curr = prob.∇f(step.x_from), prob.f(step.x_from)
+            grad_curr = prob.∇f(step.x_from)
+            f_curr = Float64(prob.f(step.x_from))
         end
 
-        _atualizar_limites!(limites_globais, trajetoria_x, trajetoria_y, cx, cy, dest_x, dest_y, dx, dy)
+        params_passo = (
+            i = i, cx = cx, cy = cy, dest_x = dest_x, dest_y = dest_y,
+            dx = dx, dy = dy, d_scalar = d_scalar, cor = cor_passo,
+            forma = forma_passo, ms = ms_passo, is_final = is_final,
+            grad_curr = grad_curr, label = label_passo
+        )
 
-        params_passo = (i=i, cx=cx, cy=cy, dest_x=dest_x, dest_y=dest_y, dx=dx, dy=dy, 
-                        d_scalar=d_scalar, cor=cor_passo, forma=forma_passo, ms=ms_passo, 
-                        is_final=is_final, grad_curr=grad_curr, label=label_passo)
+        # Plot 1: Visão Global
+        p1 = _montar_cenario_global_2d(
+            prob, meus_niveis, xs_glob, ys_glob, Z_glob, restricoes_glob,
+            trajetoria_x, trajetoria_y, rej_x, rej_y, rej_pts_x, rej_pts_y, params_passo
+        )
 
-        plots_comb = []
-        if mode in [:history, :combined]; push!(plots_comb, _montar_cenario_2d(:global, prob, step, full_log, trajetoria_x, trajetoria_y, meus_niveis, limites_globais, params_passo)); end
-        if mode in [:zoom, :combined];    push!(plots_comb, _montar_cenario_2d(:local, prob, step, full_log, trajetoria_x, trajetoria_y, meus_niveis, limites_globais, params_passo)); end
+        # Plot 2: Zoom Local
+        p2 = _montar_cenario_local_2d(prob, meus_niveis, params_passo; grid_pts=grid_density)
 
-        # --- CORTES 1D ---
+        # --- CORTES 1D MATEMATICAMENTE EXATOS PARA ATR ---
+        origem = is_final ? step.x_to : step.x_from
         norm_g = norm(grad_curr)
-        range_lim = max(d_scalar * 1.5, 1e-3)
-        origem_corte = is_final ? step.x_to : step.x_from
 
-        # Plot 3: Corte Gradiente
+        # Plot 3: Corte 1D na Direção do Gradiente / Descida Projetada
         dir_corte = (norm_g > 1e-8) ? (-grad_curr ./ norm_g) : [1.0, 0.0]
-        t_vals = range(-range_lim, range_lim, length=100)
-        f_vals_slice = [prob.f(origem_corte + t * dir_corte) for t in t_vals]
-        
-        p3 = plot(t_vals, f_vals_slice, lw=2, c=:black, label="f(x + t⋅d)", legend=:top)
-        plot!(p3, t_vals, f_curr .- t_vals .* norm_g, c=:magenta, style=:dot, alpha=0.6, label="Linear Model")
-        scatter!(p3, [0.0], [f_curr], c=:blue, ms=5, label="x_k")
-        vline!(p3, [-d_scalar, d_scalar], c=:red, style=:dash, label="Trust Region")
-        title!(p3, "Corte no Gradiente"); xlabel!(p3, "Passo t")
-        push!(plots_comb, p3)
+        t_box_grad = _calcular_fronteira_atr(dx, dy, dir_corte)
+        span_grad = max(t_box_grad * 1.5, 1e-3)
+        t_vals_g = range(-span_grad, span_grad, length=100)
+        f_slice_g = [Float64(prob.f(origem + t * dir_corte)) for t in t_vals_g]
+        m_slice_g = [f_curr - t * norm_g for t in t_vals_g]
 
-        # Plot 4: Corte Passo
+        p3 = plot(t_vals_g, f_slice_g, lw=2.2, c=:black, label="f(x + t·d_grad)", legend=:topright)
+        plot!(p3, t_vals_g, m_slice_g, c=:magenta, style=:dot, lw=1.8, label="Modelo Linear")
+        scatter!(p3, [0.0], [f_curr], c=:blue, ms=5, label="x_k")
+        vline!(p3, [-t_box_grad, t_box_grad], c=:red, style=:dash, lw=1.5, 
+               label=@sprintf("Fronteira ATR (±%.1e)", t_box_grad))
+        title!(p3, "Corte na Direção de Descida"); xlabel!(p3, "Parâmetro t"); ylabel!(p3, "f")
+
+        # Plot 4: Corte 1D na Direção do Passo LP
         step_vec = [dest_x - cx, dest_y - cy]
         len_step = norm(step_vec)
         dir_step = (len_step > 1e-8) ? (step_vec ./ len_step) : [1.0, 0.0]
-        f_vals_step = [prob.f(origem_corte + t * dir_step) for t in t_vals]
-        
-        p4 = plot(t_vals, f_vals_step, lw=2, c=:black, label="f(x + t⋅d_step)", legend=:top)
-        plot!(p4, t_vals, f_curr .+ t_vals .* dot(grad_curr, dir_step), c=:magenta, style=:dot, alpha=0.6, label="Linear Proj.")
+        t_box_step = _calcular_fronteira_atr(dx, dy, dir_step)
+        span_step = max(t_box_step, len_step) * 1.5
+        span_step = max(span_step, 1e-3)
+        t_vals_s = range(-span_step, span_step, length=100)
+        f_slice_s = [Float64(prob.f(origem + t * dir_step)) for t in t_vals_s]
+        slope_step = dot(grad_curr, dir_step)
+        m_slice_s = [f_curr + t * slope_step for t in t_vals_s]
+
+        p4 = plot(t_vals_s, f_slice_s, lw=2.2, c=:black, label="f(x + t·d_passo)", legend=:topright)
+        plot!(p4, t_vals_s, m_slice_s, c=:magenta, style=:dot, lw=1.8, label="Modelo Linear")
         scatter!(p4, [0.0], [f_curr], c=:blue, ms=5, label="x_k")
-        scatter!(p4, [len_step], [prob.f([dest_x, dest_y])], c=cor_passo, shape=forma_passo, ms=ms_passo, label=label_passo)
-        vline!(p4, [-d_scalar, d_scalar], c=:red, style=:dash, label="Trust Region")
-        title!(p4, "Corte na Direção do Passo"); xlabel!(p4, "Distância t")
-        push!(plots_comb, p4)
+        scatter!(p4, [len_step], [Float64(prob.f([dest_x, dest_y]))], c=cor_passo, shape=forma_passo, 
+                 ms=ms_passo, label=label_passo)
+        vline!(p4, [-t_box_step, t_box_step], c=:red, style=:dash, lw=1.5, 
+               label=@sprintf("Fronteira ATR (±%.1e)", t_box_step))
+        title!(p4, "Corte na Direção do Passo"); xlabel!(p4, "Distância t"); ylabel!(p4, "f")
 
-        # --- MONTAGEM FINAL ---
-        if hasproperty(step, :ared) && hasproperty(step, :pred)
-            main_title = @sprintf("Iter %d | %s\nAred: %.1e | Pred: %.1e | δ(max): %.1e\n\n", step.iter, label_passo, step.ared, step.pred, d_scalar)
-        else
-            main_title = @sprintf("Iter %d | %s | %s\nLag: %.1e | Merit: %.1e | δ(max): %.1e\n\n", step.iter, step.phase, uppercase(string(step.status)), step.Lagrange, step.Merit, d_scalar)
-        end
-
-        p_final = plot(plots_comb..., layout=@layout([a b; c d]), size=(1200, 900), plot_title=main_title, dpi=120, plot_titlevspan=0.12)
-
-        if save_video
-            repeticoes = is_final ? (fps_video * hold_time_sec) : 1
-            for _ in 1:repeticoes; frame(anim, p_final); end
-        end
-        if save_frames; savefig(p_final, joinpath(FRAMES_DIR, @sprintf("frame_%04d.png", i))); end
+        # --- TÍTULO DO PAINEL PRINCIPAL COM MÉTRICAS COMPLETAS ---
+        atr_ratio = (min(dx, dy) > 1e-12) ? (max(dx, dy) / min(dx, dy)) : 1.0
         
-        if !is_final && step.status == :accepted
-            push!(trajetoria_x, dest_x)
-            push!(trajetoria_y, dest_y)
-        end
-        if i % 10 == 0; print("."); end
-    end
-
-    if save_frames; println("\n✅ Frames salvos em: $FRAMES_DIR"); end
-
-    # --- PROCESSAMENTO DE VÍDEO ---
-    if save_video
-        temp_video = joinpath(RUN_DIR, "temp_video.mp4")
-        mp4(anim, temp_video, fps=fps_video) 
-
-        if add_audio && !isempty(audio_path) && isfile(audio_path)
-            println("\n🎵 Adicionando trilha sonora...")
-            try
-                FFMPEG.ffmpeg_exe(`-y -i $temp_video -i $audio_path -c:v copy -map 0:v -map 1:a -shortest $NOME_VIDEO_FINAL`)
-                println("✅ Vídeo final com áudio salvo em:\n   $NOME_VIDEO_FINAL")
-                rm(temp_video; force=true) 
-            catch e
-                println("❌ Erro ao rodar FFMPEG: $e")
-                mv(temp_video, NOME_VIDEO_FINAL; force=true)
-            end
+        # Formatação de métricas específicas
+        if hasproperty(step, :ared) && hasproperty(step, :pred)
+            ared_val, pred_val = Float64(step.ared), Float64(step.pred)
+            ratio_rho = abs(pred_val) > 1e-12 ? (ared_val / pred_val) : 0.0
+            metric_str = @sprintf("Ared: %.2e | Pred: %.2e | Razão ρ: %.2f | ||s||: %.2e", 
+                                  ared_val, pred_val, ratio_rho, len_step)
+        elseif hasproperty(step, :Lagrange) && hasproperty(step, :Merit)
+            norm_h = (hasproperty(prob, :h) && prob.ncon > 0) ? norm(prob.h([cx, cy])) : 0.0
+            metric_str = @sprintf("Mérito: %.2e | Lagrange: %.2e | ||h(x)||: %.2e | ||s||: %.2e", 
+                                  step.Merit, step.Lagrange, norm_h, len_step)
         else
-            if add_audio; println("\n⚠️ Áudio não encontrado ou caminho vazio. Gerando sem som."); end
-            mv(temp_video, NOME_VIDEO_FINAL; force=true)
-            println("✅ Vídeo silencioso salvo em:\n   $NOME_VIDEO_FINAL")
+            metric_str = @sprintf("||s||: %.2e", len_step)
+        end
+
+        main_title = string(
+            "[$p_name] $a_name  |  Iter $(step.iter)  |  $label_passo\n",
+            @sprintf("x = [%.4f, %.4f]  |  f(x) = %.4e  |  δ = [%.1e, %.1e] (Razão: %.1fx)\n", cx, cy, f_curr, dx, dy, atr_ratio),
+            metric_str, "\n\n"
+        )
+
+        p_final = plot(p1, p2, p3, p4; layout=@layout([a b; c d]), size=(1280, 960), 
+                       plot_title=main_title, dpi=dpi, plot_titlevspan=0.12)
+
+        frame_file = joinpath(FRAMES_DIR, @sprintf("frame_%05d.png", i))
+        savefig(p_final, frame_file)
+
+        # Atualiza trajetórias acumuladas
+        if !is_final
+            if step.status == :accepted
+                push!(trajetoria_x, dest_x)
+                push!(trajetoria_y, dest_y)
+            else
+                push!(rej_x, cx, dest_x, NaN)
+                push!(rej_y, cy, dest_y, NaN)
+                push!(rej_pts_x, dest_x)
+                push!(rej_pts_y, dest_y)
+            end
+        end
+
+        if i % 10 == 0 || i == total_frames
+            print(".")
         end
     end
+    println(" OK!")
+
+    # Duplica o último frame para segurar a visualização do ponto final no vídeo
+    if hold_time_sec > 0
+        ultimo_frame = joinpath(FRAMES_DIR, @sprintf("frame_%05d.png", total_frames))
+        num_hold = fps_video * hold_time_sec
+        for h in 1:num_hold
+            frame_idx = total_frames + h
+            dest_hold = joinpath(FRAMES_DIR, @sprintf("frame_%05d.png", frame_idx))
+            cp(ultimo_frame, dest_hold; force=true)
+        end
+    end
+
+    # 2. Compilação Direta e Rápida do Vídeo via FFMPEG
+    if save_video
+        println("🎬 Compilando vídeo MP4 via FFMPEG...")
+        try
+            FFMPEG.ffmpeg() do exe
+                pattern = joinpath(FRAMES_DIR, "frame_%05d.png")
+                run(`$exe -y -framerate $fps_video -i $pattern -c:v libx264 -pix_fmt yuv420p $NOME_VIDEO_FINAL`)
+            end
+            println("✅ Vídeo gravado com sucesso em:\n   $NOME_VIDEO_FINAL")
+
+            if add_audio && !isempty(audio_path) && isfile(audio_path)
+                println("🎵 Adicionando trilha sonora...")
+                temp_audio_vid = joinpath(RUN_DIR, "temp_video_audio.mp4")
+                try
+                    FFMPEG.ffmpeg() do exe
+                        run(`$exe -y -i $NOME_VIDEO_FINAL -i $audio_path -c:v copy -map 0:v -map 1:a -shortest $temp_audio_vid`)
+                    end
+                    mv(temp_audio_vid, NOME_VIDEO_FINAL; force=true)
+                    println("✅ Áudio incorporado com sucesso!")
+                catch e
+                    println("⚠️ Falha ao embutir áudio: $e")
+                end
+            end
+        catch err
+            println("❌ Erro durante compilação do FFMPEG: $err")
+        end
+    end
+
+    if !save_frames
+        println("🧹 Limpando frames temporários individuais...")
+        rm(FRAMES_DIR; recursive=true, force=true)
+    else
+        println("🖼️  Frames individuais preservados em: $FRAMES_DIR")
+    end
+
+    return NOME_VIDEO_FINAL
 end
+
+"""
+    visualizar_frames_dinamicos(prob, full_log; kwargs...)
+
+Versão mais compacta com 2 subplots lado a lado (Visão Global + Zoom Local).
+"""
+function visualizar_frames_dinamicos(
+    prob, full_log;
+    mode::Symbol=:combined,
+    save_frames::Bool=true,
+    save_video::Bool=true,
+    fps_video::Int=10,
+    output_dir::String="",
+    video_name::String="dinamico.mp4",
+    algo_name::String="",
+    prob_name::String=""
+)
+    return visualizar_frames_3plots(
+        prob, full_log;
+        mode=mode, save_frames=save_frames, save_video=save_video,
+        fps_video=fps_video, output_dir=output_dir, video_name=video_name,
+        algo_name=algo_name, prob_name=prob_name
+    )
+end
+
+"""
+    visualize_optimization(prob, full_log; kwargs...)
+
+Alias ergonômico moderno para `visualizar_frames_3plots`.
+"""
+const visualize_optimization = visualizar_frames_3plots
+
+# Alias retrocompatível com módulos antigos
+const visualizar_frames_3plotsModule = Generic_Visualization
 
 end # module

@@ -7,6 +7,7 @@ export run_statistical_analysis
 
 using CSV
 using DataFrames
+using Dates
 ENV["GKSwstype"] = "100"
 using Plots
 using Statistics
@@ -202,38 +203,59 @@ function run_statistical_analysis(results_dir::String, df_meta::Union{DataFrame,
         end
     end
 
-    XLSX.openxlsx(output_file, mode="w") do xf
-        sheet_idx = 1
-        if df_meta !== nothing && nrow(df_meta) > 0
-            XLSX.rename!(xf[sheet_idx], "Metadata_Environment")
-            XLSX.writetable!(xf[sheet_idx], collect(eachcol(df_meta)), names(df_meta))
-            sheet_idx += 1
-            XLSX.addsheet!(xf, "Scenario_A")
-        else
-            XLSX.rename!(xf[sheet_idx], "Scenario_A")
-        end
+    function _write_sheets(target_path)
+        XLSX.openxlsx(target_path, mode="w") do xf
+            sheet_idx = 1
+            if df_meta !== nothing && nrow(df_meta) > 0
+                XLSX.rename!(xf[sheet_idx], "Metadata_Environment")
+                XLSX.writetable!(xf[sheet_idx], collect(eachcol(df_meta)), names(df_meta))
+                sheet_idx += 1
+                XLSX.addsheet!(xf, "Scenario_A")
+            else
+                XLSX.rename!(xf[sheet_idx], "Scenario_A")
+            end
 
-        if nrow(stats_A) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(stats_A)), names(stats_A)) end
-        sheet_idx += 1
-        
-        XLSX.addsheet!(xf, "Scenario_B")
-        if nrow(stats_B) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(stats_B)), names(stats_B)) end
-        sheet_idx += 1
-        
-        XLSX.addsheet!(xf, "Scenario_C")
-        if nrow(stats_C) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(stats_C)), names(stats_C)) end
-        sheet_idx += 1
-        
-        XLSX.addsheet!(xf, "Intra_Comparison")
-        if nrow(df_res_intra) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(df_res_intra)), names(df_res_intra)) end
-        sheet_idx += 1
-        
-        XLSX.addsheet!(xf, "Inter_Comparison")
-        if nrow(df_res_inter) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(df_res_inter)), names(df_res_inter)) end
-        sheet_idx += 1
-        
-        XLSX.addsheet!(xf, "Inter_Details")
-        if nrow(df_inter_details) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(df_inter_details)), names(df_inter_details)) end
+            if nrow(stats_A) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(stats_A)), names(stats_A)) end
+            sheet_idx += 1
+            
+            XLSX.addsheet!(xf, "Scenario_B")
+            if nrow(stats_B) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(stats_B)), names(stats_B)) end
+            sheet_idx += 1
+            
+            XLSX.addsheet!(xf, "Scenario_C")
+            if nrow(stats_C) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(stats_C)), names(stats_C)) end
+            sheet_idx += 1
+            
+            XLSX.addsheet!(xf, "Intra_Comparison")
+            if nrow(df_res_intra) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(df_res_intra)), names(df_res_intra)) end
+            sheet_idx += 1
+            
+            XLSX.addsheet!(xf, "Inter_Comparison")
+            if nrow(df_res_inter) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(df_res_inter)), names(df_res_inter)) end
+            sheet_idx += 1
+            
+            XLSX.addsheet!(xf, "Inter_Details")
+            if nrow(df_inter_details) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(df_inter_details)), names(df_inter_details)) end
+        end
+    end
+
+    try
+        _write_sheets(output_file)
+        println("✅ Relatório XLSX gravado em: $(basename(output_file))")
+    catch err
+        if occursin("Permission denied", string(err)) || occursin("SystemError", string(err))
+            fallback_file = joinpath(results_dir, "Consolidated_Statistics_$(Dates.format(now(), "HH-MM-SS")).xlsx")
+            println("⚠️ Não foi possível sobrescrever $(basename(output_file)) (arquivo aberto no Excel).")
+            println("   Salvando como: $(basename(fallback_file))")
+            try
+                _write_sheets(fallback_file)
+                println("✅ Relatório XLSX gravado com sucesso no arquivo alternativo!")
+            catch e2
+                println("⚠️ Falha ao gravar XLSX alternativo: $e2")
+            end
+        else
+            rethrow(err)
+        end
     end
 
     println("✅ Execution and Analysis complete. Results, Plots, and XLSX saved to: $results_dir")
@@ -273,11 +295,48 @@ function generate_summary_table(df::DataFrame)
 end
 
 function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir::String)
-    all_variants = unique(df.Variant)
-    get_existing(wanted::Vector{String}) = intersect(wanted, all_variants)
-    
     plots_dir = joinpath(out_dir, "Performance Profile Plots")
     mkpath(plots_dir)
+
+    dir_kkt = joinpath(plots_dir, "1_Status_KKT_OK")
+    dir_best_f = joinpath(plots_dir, "2_Melhor_Objetivo_f")
+    mkpath(dir_kkt)
+    mkpath(dir_best_f)
+
+    # Documenta de forma transparente os dois critérios avaliados
+    readme_path = joinpath(plots_dir, "README_CRITERIOS.txt")
+    write(readme_path, """
+================================================================================
+METODOLOGIAS DE AVALIAÇÃO DOS PERFIS DE DESEMPENHO (DOLAN-MORÉ)
+================================================================================
+
+1. Pasta '1_Status_KKT_OK':
+   - Critério: Convergência Formal KKT (Status == "KKT_OK" com viabilidade satisfeita).
+   - O patamar final (τ -> ∞) reflete rigorosamente a taxa de sucesso no atendimento
+     das condições de otimalidade de primeira ordem KKT.
+   - Corresponde 1:1 à métrica 'Solved_KKT' do sumário estatístico.
+
+2. Pasta '2_Melhor_Objetivo_f':
+   - Critério: Qualidade Global da Solução (Melhor f(x*) viável encontrada).
+   - Um solver pontua no problema se for viável (||h(x*)|| <= 1e-5) e encontrar
+     o menor valor da função objetivo f(x*) entre todos os concorrentes viáveis daquele grupo
+     (dentro de tolerância relativa/absoluta de 1e-5).
+   - O patamar final (τ -> ∞) indica em quantos problemas o algoritmo encontrou a
+     melhor solução viável do torneio.
+================================================================================
+""")
+
+    println("  📁 [1/2] Gerando perfis por Status KKT_OK em: Performance Profile Plots/1_Status_KKT_OK...")
+    _generate_group_plots(df, summary, dir_kkt; criterion=:kkt_ok)
+
+    println("  📁 [2/2] Gerando perfis por Melhor f(x*) em: Performance Profile Plots/2_Melhor_Objetivo_f...")
+    _generate_group_plots(df, summary, dir_best_f; criterion=:best_f)
+end
+
+function _generate_group_plots(df::DataFrame, summary::DataFrame, target_dir::String; criterion::Symbol=:kkt_ok)
+    all_variants = unique(df.Variant)
+    get_existing(wanted::Vector{String}) = intersect(wanted, all_variants)
+    crit_tag = criterion == :kkt_ok ? "KKT_OK" : "Melhor f"
 
     # ---------------------------------------------------------
     # GROUP 1: UNIF - The Impact of SAR and PH
@@ -288,8 +347,8 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
         "UNIF_SAR1_PH1_ATR0",   # SAR1, PH1
         "UNIF_SAR0_PH1_ATR0"    # SAR0, PH1
     ])
-    plot_profile(df, g1, :Time_ms, "Group 1: UNIF - SAR vs PH (Time)", joinpath(plots_dir, "Profile_G1_UNIF_SAR_PH_Time.png"))
-    plot_profile(df, g1, :Iterations, "Group 1: UNIF - SAR vs PH (Iters)", joinpath(plots_dir, "Profile_G1_UNIF_SAR_PH_Iters.png"))
+    plot_profile(df, g1, :Time_ms, "Group 1: UNIF - SAR vs PH (Time) [$crit_tag]", joinpath(target_dir, "Profile_G1_UNIF_SAR_PH_Time.png"); criterion=criterion)
+    plot_profile(df, g1, :Iterations, "Group 1: UNIF - SAR vs PH (Iters) [$crit_tag]", joinpath(target_dir, "Profile_G1_UNIF_SAR_PH_Iters.png"); criterion=criterion)
 
     # ---------------------------------------------------------
     # GROUP 2: UNIF - The Impact of Anisotropy (ATR)
@@ -303,8 +362,8 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
         "UNIF_SAR0_PH1_ATR1_DECOMPOSED_CUT",
         "UNIF_SAR0_PH1_ATR1_SECANT_BOX"
     ])
-    plot_profile(df, g2, :Time_ms, "Group 2: UNIF - Anisotropy (Time)", joinpath(plots_dir, "Profile_G2_UNIF_ATR_Time.png"))
-    plot_profile(df, g2, :Iterations, "Group 2: UNIF - Anisotropy (Iters)", joinpath(plots_dir, "Profile_G2_UNIF_ATR_Iters.png"))
+    plot_profile(df, g2, :Time_ms, "Group 2: UNIF - Anisotropy (Time) [$crit_tag]", joinpath(target_dir, "Profile_G2_UNIF_ATR_Time.png"); criterion=criterion)
+    plot_profile(df, g2, :Iterations, "Group 2: UNIF - Anisotropy (Iters) [$crit_tag]", joinpath(target_dir, "Profile_G2_UNIF_ATR_Iters.png"); criterion=criterion)
     
     # ---------------------------------------------------------
     # GROUP 3: Two-Phase - Ratio Strategies (SAR & RRU)
@@ -315,8 +374,8 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
         "2P_SAR1_PH0_ATR0_RRU1", # SAR1, RRU1
         "2P_SAR0_PH0_ATR0_RRU1"  # SAR0, RRU1
     ])
-    plot_profile(df, g3, :Time_ms, "Group 3: 2P - Ratio Strategies (Time)", joinpath(plots_dir, "Profile_G3_2P_Ratio_Time.png"))
-    plot_profile(df, g3, :Iterations, "Group 3: 2P - Ratio Strategies (Iters)", joinpath(plots_dir, "Profile_G3_2P_Ratio_Iters.png"))
+    plot_profile(df, g3, :Time_ms, "Group 3: 2P - Ratio Strategies (Time) [$crit_tag]", joinpath(target_dir, "Profile_G3_2P_Ratio_Time.png"); criterion=criterion)
+    plot_profile(df, g3, :Iterations, "Group 3: 2P - Ratio Strategies (Iters) [$crit_tag]", joinpath(target_dir, "Profile_G3_2P_Ratio_Iters.png"); criterion=criterion)
     
     # ---------------------------------------------------------
     # GROUP 4: Two-Phase - Step Shapes (PH & ATR)
@@ -331,8 +390,8 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
         "2P_SAR0_PH1_ATR1_RRU1_DECOMPOSED_CUT",
         "2P_SAR0_PH1_ATR1_RRU1_SECANT_BOX"
     ])
-    plot_profile(df, g4, :Time_ms, "Group 4: 2P - Step Shapes & ATR (Time)", joinpath(plots_dir, "Profile_G4_2P_Shapes_Time.png"))
-    plot_profile(df, g4, :Iterations, "Group 4: 2P - Step Shapes & ATR (Iters)", joinpath(plots_dir, "Profile_G4_2P_Shapes_Iters.png"))
+    plot_profile(df, g4, :Time_ms, "Group 4: 2P - Step Shapes & ATR (Time) [$crit_tag]", joinpath(target_dir, "Profile_G4_2P_Shapes_Time.png"); criterion=criterion)
+    plot_profile(df, g4, :Iterations, "Group 4: 2P - Step Shapes & ATR (Iters) [$crit_tag]", joinpath(target_dir, "Profile_G4_2P_Shapes_Iters.png"); criterion=criterion)
 
     # ---------------------------------------------------------
     # GROUP 8: Direct 2P vs UNIF across Parabolic & ATR Strategies
@@ -349,8 +408,8 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
         "UNIF_SAR0_PH1_ATR1_DECOMPOSED_CUT",
         "UNIF_SAR0_PH1_ATR1_SECANT_BOX"
     ])
-    plot_profile(df, g8, :Time_ms, "Group 8: 2P vs UNIF - All Parabolic/ATR (Time)", joinpath(plots_dir, "Profile_G8_2P_vs_UNIF_ATR_Time.png"))
-    plot_profile(df, g8, :Iterations, "Group 8: 2P vs UNIF - All Parabolic/ATR (Iters)", joinpath(plots_dir, "Profile_G8_2P_vs_UNIF_ATR_Iters.png"))
+    plot_profile(df, g8, :Time_ms, "Group 8: 2P vs UNIF - All Parabolic/ATR (Time) [$crit_tag]", joinpath(target_dir, "Profile_G8_2P_vs_UNIF_ATR_Time.png"); criterion=criterion)
+    plot_profile(df, g8, :Iterations, "Group 8: 2P vs UNIF - All Parabolic/ATR (Iters) [$crit_tag]", joinpath(target_dir, "Profile_G8_2P_vs_UNIF_ATR_Iters.png"); criterion=criterion)
 
     # ---------------------------------------------------------
     # GROUP 5: UNIF SQP Hessian Battle
@@ -364,7 +423,7 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
             "$(best_unif)_SQP_IDENTITY",
             "$(best_unif)_SQP_SPECTRAL"
         ])
-        plot_profile(df, g5, :Time_ms, "Group 5: UNIF SQP Strategies (Time)", joinpath(plots_dir, "Profile_G5_UNIF_SQP_Time.png"))
+        plot_profile(df, g5, :Time_ms, "Group 5: UNIF SQP Strategies (Time) [$crit_tag]", joinpath(target_dir, "Profile_G5_UNIF_SQP_Time.png"); criterion=criterion)
     end
 
     # ---------------------------------------------------------
@@ -379,7 +438,7 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
             "$(best_tp)_SQP_IDENTITY",
             "$(best_tp)_SQP_SPECTRAL"
         ])
-        plot_profile(df, g6, :Time_ms, "Group 6: 2P SQP Strategies (Time)", joinpath(plots_dir, "Profile_G6_2P_SQP_Time.png"))
+        plot_profile(df, g6, :Time_ms, "Group 6: 2P SQP Strategies (Time) [$crit_tag]", joinpath(target_dir, "Profile_G6_2P_SQP_Time.png"); criterion=criterion)
     end
 
     # ---------------------------------------------------------
@@ -397,8 +456,8 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
     isnothing(best_tp)       || push!(g7, best_tp)
     isnothing(best_tp_sqp)   || push!(g7, best_tp_sqp)
 
-    plot_profile(df, g7, :Time_ms, "Best of Classes (Time)", joinpath(plots_dir, "Profile_G7_Finale_Time.png"))
-    plot_profile(df, g7, :Iterations, "Best of Classes (Iters)", joinpath(plots_dir, "Profile_G7_Finale_Iters.png"))
+    plot_profile(df, g7, :Time_ms, "Best of Classes (Time) [$crit_tag]", joinpath(target_dir, "Profile_G7_Finale_Time.png"); criterion=criterion)
+    plot_profile(df, g7, :Iterations, "Best of Classes (Iters) [$crit_tag]", joinpath(target_dir, "Profile_G7_Finale_Iters.png"); criterion=criterion)
 end
 
 function get_best_in_class(class_variants::Vector{String}, summary::DataFrame)
@@ -409,74 +468,24 @@ function get_best_in_class(class_variants::Vector{String}, summary::DataFrame)
 end
 
 """
-Builds a Dolan-Moré performance profile (step plot) for a specific metric and subset of solvers.
+    plot_profile(df, solvers, metric_col, title_str, filename, color_map; criterion=:kkt_ok, f_tol=1e-5, h_tol=1e-5)
+
+Constrói um perfil de desempenho de Dolan-Moré sob dois critérios metodológicos distintos:
+- `criterion=:kkt_ok` : Mede formalmente a convergência de primeira ordem (`Status == "KKT_OK"` com viabilidade satisfeita).
+- `criterion=:best_f` : Mede a qualidade do ponto encontrado, considerando como vencedores os algoritmos que alcançaram
+                         o menor valor viável de f(x*) entre os concorrentes (com tolerância relativa/absoluta de 1e-5).
 """
-# function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol, title_str::String, filename::String)
-#     if length(solvers) < 2
-#         println("  > Skipping '$title_str': Not enough valid solvers in this group.")
-#         return
-#     end
-
-#     problems = unique(df.Problem)
-#     n_probs = length(problems)
-#     n_solvers = length(solvers)
-
-#     perf_matrix = fill(Inf, n_probs, n_solvers)
-
-#     for (j, s) in enumerate(solvers)
-#         for (i, p) in enumerate(problems)
-#             row = df[(df.Variant .== s) .& (df.Problem .== p), :]
-#             if nrow(row) > 0 && row[1, :Status] == "KKT_OK"
-#                 val = Float64(row[1, metric_col])
-#                 perf_matrix[i, j] = val <= 0.0 ? 1e-8 : val
-#             end
-#         end
-#     end
-
-#     min_vals = minimum(perf_matrix, dims=2)
-#     ratios = perf_matrix ./ min_vals
-#     ratios[isnan.(ratios)] .= Inf
-
-#     valid_ratios = filter(x -> !isinf(x), ratios)
-#     max_tau = isempty(valid_ratios) ? 10.0 : maximum(valid_ratios)
-#     plot_max = max(10.0, max_tau * 1.1)
-
-#     p = plot(title=title_str, 
-#              xlabel="Performance Ratio (τ)", 
-#              ylabel="Fraction of Solved Problems", 
-#              legend=:bottomright, 
-#              xscale=:log10, 
-#              framestyle=:box,
-#              dpi=300,
-#              size=(800, 600))
-
-#     for (j, s) in enumerate(solvers)
-#         sorted_r = sort(ratios[:, j])
-#         filter!(x -> !isinf(x), sorted_r)
-        
-#         n_solved = length(sorted_r)
-        
-#         x_vals = [1.0]
-#         y_vals = [0.0]
-        
-#         for (k, r) in enumerate(sorted_r)
-#             push!(x_vals, r)
-#             push!(y_vals, k / n_probs)
-#         end
-        
-#         push!(x_vals, plot_max)
-#         push!(y_vals, n_solved / n_probs)
-
-#         clean_label = replace(s, "SLP_" => "UNIF ", "2P_" => "2P ","BASE_SLP" => "UNIF SAR1_PH0_ATR0", "BASE_2P" => "2P SAR1_PH0_ATR0_RRU0")
-
-#         plot!(p, x_vals, y_vals, linetype=:steppost, label=clean_label, linewidth=2.5)
-#     end
-
-#     savefig(p, filename)
-#     println("  > Saved: $(basename(filename))")
-# end
-
-function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol, title_str::String, filename::String, color_map::AbstractDict=Dict{String,Any}())
+function plot_profile(
+    df::DataFrame,
+    solvers::Vector{String},
+    metric_col::Symbol,
+    title_str::String,
+    filename::String,
+    color_map::AbstractDict=Dict{String,Any}();
+    criterion::Symbol=:kkt_ok,
+    f_tol::Float64=1e-5,
+    h_tol::Float64=1e-5
+)
     if length(solvers) < 2
         println("  > Skipping '$title_str': Not enough valid solvers in this group.")
         return
@@ -487,48 +496,75 @@ function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol
     n_solvers = length(solvers)
 
     perf_matrix = fill(Inf, n_probs, n_solvers)
+    infeasible_statuses = ["INFEASIBLE_STATIONARY", "STALLED_INFEASIBLE", "FAIL", "ERROR"]
 
-    infeasible_statuses = ["INFEASIBLE_STATIONARY", "STALLED_INFEASIBLE"]
-    f_tol = 1e-5 # Tolerância numérica para considerar empate na função objetivo
-    h_tol = 1e-5 # Tolerância máxima de violação para atestar viabilidade
+    has_h = :h_norm in propertynames(df)
 
-    for (i, p) in enumerate(problems)
-        df_p = df[df.Problem .== p, :]
-        
-        # Etapa 1: Encontrar a melhor função objetivo (F_min) entre os solvers viáveis
-        best_f = Inf
-        for s in solvers
-            row = df_p[df_p.Variant .== s, :]
-            if nrow(row) > 0
-                status = row[1, :Status]
-                h_val = Float64(row[1, :h_norm])
-                
-                if !(status in infeasible_statuses) && h_val <= h_tol
-                    f_val = Float64(row[1, :f_final])
-                    best_f = min(best_f, f_val)
-                end
-            end
-        end
-
-        isinf(best_f) && continue
-
-        # Etapa 2: Preencher a matriz de performance para os que atingiram F_min
+    if criterion == :kkt_ok
+        # ----------------------------------------------------------------------
+        # CRITÉRIO 1: STATUS KKT_OK (Convergência Formal)
+        # ----------------------------------------------------------------------
         for (j, s) in enumerate(solvers)
-            row = df_p[df_p.Variant .== s, :]
-            if nrow(row) > 0
-                status = row[1, :Status]
-                h_val = Float64(row[1, :h_norm])
-                
-                if !(status in infeasible_statuses) && h_val <= h_tol
-                    f_val = Float64(row[1, :f_final])
+            for (i, p) in enumerate(problems)
+                row = df[(df.Variant .== s) .& (df.Problem .== p), :]
+                if nrow(row) > 0
+                    st = string(row[1, :Status])
+                    h_val = has_h ? Float64(row[1, :h_norm]) : 0.0
                     
-                    if f_val <= best_f + f_tol + f_tol * abs(best_f)
+                    if st == "KKT_OK" && (isnan(h_val) || h_val <= h_tol)
                         val = Float64(row[1, metric_col])
-                        perf_matrix[i, j] = val <= 0.0 ? 1e-8 : val
+                        if isfinite(val)
+                            perf_matrix[i, j] = val <= 0.0 ? 1e-8 : val
+                        end
                     end
                 end
             end
         end
+        ylabel_str = "Fração de Problemas Resolvidos (KKT OK)"
+    else
+        # ----------------------------------------------------------------------
+        # CRITÉRIO 2: MELHOR f(x*) (Qualidade Global da Solução)
+        # ----------------------------------------------------------------------
+        for (i, p) in enumerate(problems)
+            df_p = df[df.Problem .== p, :]
+            
+            # Etapa 1: Encontrar o menor f(x*) entre todos os solvers viáveis do grupo
+            best_f = Inf
+            for s in solvers
+                row = df_p[df_p.Variant .== s, :]
+                if nrow(row) > 0
+                    st = string(row[1, :Status])
+                    h_val = has_h ? Float64(row[1, :h_norm]) : 0.0
+                    f_val = Float64(row[1, :f_final])
+                    
+                    if !(st in infeasible_statuses) && (isnan(h_val) || h_val <= h_tol) && isfinite(f_val)
+                        best_f = min(best_f, f_val)
+                    end
+                end
+            end
+
+            isinf(best_f) && continue
+
+            # Etapa 2: Preencher matriz para os que empatam com a melhor função objetivo
+            for (j, s) in enumerate(solvers)
+                row = df_p[df_p.Variant .== s, :]
+                if nrow(row) > 0
+                    st = string(row[1, :Status])
+                    h_val = has_h ? Float64(row[1, :h_norm]) : 0.0
+                    f_val = Float64(row[1, :f_final])
+                    
+                    if !(st in infeasible_statuses) && (isnan(h_val) || h_val <= h_tol) && isfinite(f_val)
+                        if f_val <= best_f + f_tol * (1.0 + abs(best_f))
+                            val = Float64(row[1, metric_col])
+                            if isfinite(val)
+                                perf_matrix[i, j] = val <= 0.0 ? 1e-8 : val
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        ylabel_str = "Fração com Melhor f(x*) Viável"
     end
 
     min_vals = minimum(perf_matrix, dims=2)
@@ -537,11 +573,11 @@ function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol
 
     valid_ratios = filter(x -> !isinf(x), ratios)
     max_tau = isempty(valid_ratios) ? 10.0 : maximum(valid_ratios)
-    plot_max = max(10.0, max_tau * 1.1)
+    plot_max = min(max(10.0, max_tau * 1.1), 1000.0)
 
     p = plot(title=title_str, 
              xlabel="Performance Ratio (τ)", 
-             ylabel="Fraction of Solved Problems", 
+             ylabel=ylabel_str, 
              legend=:bottomright, 
              xscale=:log10, 
              framestyle=:box,
