@@ -1,0 +1,2 @@
+Problem,Git_Commit,nvar,ncon,Variant,SAR,M,PH,ATR,RRU,Status,Iterations,Time_ms,f_final,h_norm,Is_Base
+HS6,07d7bd7,2,1,2P_SAR0_PH0_ATR0_RRU1,false,1,false,false,true,KKT_OK,43,673.2085,4.4531781461599204e-7,2.4915488505694583e-5,false

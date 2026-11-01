@@ -5,26 +5,10 @@ export create_optimized_model, restoration_phase, optimization_phase, two_phase_
 
 using JuMP, Gurobi, Printf, LinearAlgebra, RipQP,SparseArrays, QuadraticModels
 using ..SharedTypes
-include("Generic_module_ComputeB.jl")
+using ..Generic_module_ComputeB
 # ==============================================================================
 # UTILITY FUNCTIONS
 # ==============================================================================
-
-# Ensures the trust region maintains a healthy minimum aspect ratio.
-# If a dimension falls below the threshold relative to the maximum, it is inflated 
-# to prevent stagnation in diagonal valleys.
-function enforce_aspect_ratio!(δ::Vector{Float64}, min_ratio::Float64=1e-3) # rescale scale
-    max_delta = maximum(δ)
-    threshold = max_delta * min_ratio
-    changed = false
-    for i in 1:length(δ)
-        if δ[i] < threshold
-            δ[i] = threshold 
-            changed = true
-        end
-    end
-    return changed
-end
 
 # Logs messages to the console and/or an IO stream
 function log_message!(msg, io; verbose=true)
@@ -42,176 +26,6 @@ end
     return θ * (F + dot(h, λ)) + (1 - θ) * norm(h)
 end
 
-function compute_gradient_projection(
-    x::Vector{Float64},
-    Fgrad::Vector{Float64},
-    jac_h::AbstractMatrix{Float64},
-    λ::Vector{Float64},
-    xl::Vector{Float64},
-    xu::Vector{Float64};
-    norm_type::Union{Float64, Int} = Inf,
-    strategy::Symbol=:dykstra,
-    max_iter::Int=500,
-    tol::Float64=1e-8,
-    debug::Bool=false
-)
-    n = length(x)
-    m = size(jac_h, 1)
-    
-    run_lagrangian = (strategy == :lagrangian) || debug
-    run_qp         = (strategy == :qp)         || debug
-    run_dykstra    = (strategy == :dykstra)    || debug
-
-    buf_lag = run_lagrangian ? zeros(n) : Float64[]
-    buf_qp  = run_qp         ? zeros(n) : Float64[]
-    buf_dyk = run_dykstra    ? zeros(n) : Float64[]
-    qp_succeeded = true
-
-    # 1. Método: Lagrangiano (dependente de lambda)
-    if run_lagrangian
-        if m > 0
-            Lgrad = Fgrad .+ jac_h' * λ
-        else
-            Lgrad = Fgrad
-        end
-        for i in 1:n
-            buf_lag[i] = clamp(x[i] - Lgrad[i], xl[i], xu[i]) - x[i]
-        end
-    end
-
-    if run_qp || run_dykstra
-        v = x .- Fgrad
-        b_target = m > 0 ? jac_h * x : Float64[]
-
-        function execute_dykstra!(out_buffer)
-            p_dyk = copy(v)
-            q = zeros(n)
-            r = zeros(n)
-            y_val = zeros(n)
-            
-            local fact_J
-            if m > 0
-                J_Jt = jac_h * jac_h'
-                fact_J = lu(J_Jt + 1e-12 * I)
-            end
-            
-            for k in 1:max_iter
-                p_old = copy(p_dyk)
-                
-                # Projeção 1: Limites da caixa (Box)
-                for i in 1:n
-                    val = p_dyk[i] + q[i]
-                    y_val[i] = clamp(val, xl[i], xu[i])
-                    q[i] = val - y_val[i]
-                end
-                
-                # Projeção 2: Hiperplanos
-                if m > 0
-                    y_plus_r = y_val .+ r
-                    res = jac_h * y_plus_r .- b_target
-                    lambda_proj = fact_J \ res
-                    
-                    p_dyk .= y_plus_r .- jac_h' * lambda_proj
-                    r .= y_plus_r .- p_dyk
-                else
-                    p_dyk .= y_val
-                end
-                
-                max_diff = norm(p_dyk .- p_old, Inf)
-                if max_diff < tol
-                    break
-                end
-            end
-            
-            for i in 1:n
-                out_buffer[i] = p_dyk[i] - x[i]
-            end
-        end
-
-        # 2. Método: QP via JuMP
-        if run_qp
-            model = Model(Gurobi.Optimizer)
-            set_silent(model)
-            @variable(model, xl[i] <= p_var[i=1:n] <= xu[i])
-            @objective(model, Min, 0.5 * sum((p_var[i] - v[i])^2 for i in 1:n))
-            
-            if m > 0
-                @constraint(model, jac_h * p_var .== b_target)
-            end
-            
-            optimize!(model)
-            status = termination_status(model)
-            if status == MOI.OPTIMAL || status == MOI.LOCALLY_SOLVED
-                p_opt = value.(p_var)
-                for i in 1:n
-                    buf_qp[i] = p_opt[i] - x[i]
-                end
-            else
-                qp_succeeded = false
-                execute_dykstra!(buf_qp) # Fallback
-            end
-        end
-
-        # 3. Método: Dykstra Nativo
-        if run_dykstra
-            execute_dykstra!(buf_dyk)
-        end
-    end
-
-    if debug
-        n_lag = norm(buf_lag, norm_type)
-        n_qp  = run_qp ? norm(buf_qp, norm_type) : 0.0
-        n_dyk = run_dykstra ? norm(buf_dyk, norm_type) : 0.0
-        
-        println("--- DEBUG: Gradient Projection Comparison ---")
-        @printf("Lagrangian norm : %.8e\n", n_lag)
-        @printf("QP norm         : %.8e%s\n", n_qp, qp_succeeded ? "" : " (FALLBACK: Dykstra usado)")
-        @printf("Dykstra norm    : %.8e\n", n_dyk)
-        println("---------------------------------------------")
-    end
-        
-    if strategy == :lagrangian
-        return buf_lag
-    elseif strategy == :qp
-        return buf_qp
-    elseif strategy == :dykstra
-        return buf_dyk
-    else
-        error("Estratégia inválida: $strategy")
-    end
-end
-
-# Calculates the diagonal matrix B_k for the quadratic subproblem.
-# Supported strategies:
-#    • :identity  → B = σ_fallback * I
-#    • :spectral  → B = α I (pure spectral with safeguards)
-#    • :exact     → B = ∇²L(x, λ) (Exact Hessian of the Lagrangian)
-# function compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{Float64}, σ_fallback::Float64, problem::OptimizationProblem, x_new::Vector{Float64}, λ::Vector{Float64})
-#     if strategy == :exact
-#         B_exact = problem.∇²L(x_new, λ)
-#         return B_exact
-        
-#     elseif strategy == :identity
-#         return σ_fallback * spdiagm(0 => ones(n))
-        
-#     elseif strategy == :spectral
-#         if norm(s) < 1e-8 || norm(y_grad) < 1e-8
-#             return σ_fallback * spdiagm(0 => ones(n))
-#         end
-#         sTy = dot(s, y_grad)
-#         yTy = dot(y_grad, y_grad)
-#         if sTy <= 1e-12
-#             return σ_fallback * spdiagm(0 => ones(n))
-#         end
-#         alpha = yTy / sTy
-#         alpha = clamp(alpha, 1e-4, 1e4)
-#         return alpha * spdiagm(0 => ones(n))
-        
-#     else
-#         error("Unknown B calculation strategy: $strategy")
-#     end
-# end
-
 # ==============================================================================
 # JUMP MODEL CREATION
 # ==============================================================================
@@ -221,7 +35,7 @@ function create_optimized_model(solver_choice::Symbol, phase::Symbol, n::Int, m:
 # Create base model
     model = if solver_choice == :gurobi
         # Usa a constante global em vez de criar um novo env
-        Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), "OutputFlag" => 0))
+        Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), MOI.Silent() => true, "Method" => 1, "Presolve" => 0))
 
     elseif solver_choice == :highs
         Model(optimizer_with_attributes(HiGHS.Optimizer, "output_flag" => false, "threads" => Threads.nthreads(), "primal_feasibility_tolerance" => 1e-8, "dual_feasibility_tolerance" => 1e-8))
@@ -271,7 +85,7 @@ end
 # ==============================================================================
 
 # Solves the specific restoration subproblem at a given point z
-function solve_restoration_subproblem!(model::JuMP.Model, problem::OptimizationProblem, z::Vector{Float64}, δ::Union{Float64, Vector{Float64}})
+function solve_restoration_subproblem!(model::JuMP.Model, problem::OptimizationProblem, z::Vector{Float64}, δ::T) where {T<:Union{Float64, Vector{Float64}}}
     n = length(z)
     # Evaluate Jacobian and constraints at z
     A = problem.∇h(z)  # m × n
@@ -283,39 +97,20 @@ function solve_restoration_subproblem!(model::JuMP.Model, problem::OptimizationP
     con = model.obj_dict[:con]
     # Update bounds: max(xl-z, -δ) ≤ d ≤ min(xu-z, δ)
     for i in 1:n
-
-        d_val = (δ isa Vector) ? δ[i] : δ
+        d_val = get_δ(δ, i)
         lb = max(problem.xl[i] - z[i], -d_val)
         ub = min(problem.xu[i] - z[i], d_val)
         set_lower_bound(d[i], lb)
         set_upper_bound(d[i], ub)
     end
-    # Determine E(z^ℓ): A(z^ℓ)d + E(z^ℓ)w = -h(z^ℓ)
+    # Determine E(z^ℓ) and update constraints: A(z^ℓ)d + E(z^ℓ)w = -h(z^ℓ)
     # To keep w ≥ 0, we need: E(z^ℓ) = -sign(h(z^ℓ))
-    E = zeros(m)
     for i in 1:m
-        if h_z[i] > 0
-            E[i] = -1.0
-        elseif h_z[i] < 0
-            E[i] = 1.0
-        else
-            E[i] = 0.0
-        end
-    end
-    # Update constraints: A(z^ℓ)d + E(z^ℓ)w = -h(z^ℓ)
-    for i in 1:m
-        # Zero out existing coefficients
-        for j in 1:n
-            set_normalized_coefficient(con[i], d[j], 0.0)
-        end
-        set_normalized_coefficient(con[i], w[i], 0.0)
-        # Set coefficients for d[j]
+        Ei = h_z[i] > 0 ? -1.0 : (h_z[i] < 0 ? 1.0 : 0.0)
         for j in 1:n
             set_normalized_coefficient(con[i], d[j], A[i, j])
         end
-        # Set coefficient for w[i]
-        set_normalized_coefficient(con[i], w[i], E[i])
-        # RHS = -h(z)
+        set_normalized_coefficient(con[i], w[i], Ei)
         set_normalized_rhs(con[i], -h_z[i])
     end
     # Solve
@@ -332,14 +127,15 @@ end
 function restoration_phase(
     problem::OptimizationProblem, 
     z::Vector{Float64}, 
-    δ::Union{Float64, Vector{Float64}}, 
+    δ::T, 
     model::JuMP.Model; 
     params, 
     verbose::Bool=params.verbose_in, 
     buffers::OptimizedBuffers, 
     full_log::Vector{StepLog_TwoPhase}=Vector{StepLog_TwoPhase}(), 
-    iterglobal::Int
-)
+    iterglobal::Int,
+    history::Bool=true
+) where {T<:Union{Float64, Vector{Float64}}}
     # =========================================================
     # Step 1: Target parameters calculation based on original point
     # =========================================================
@@ -358,6 +154,8 @@ function restoration_phase(
     # =========================================================
     ℓ = 0
     c_prev = c_init
+    h_z = h_init
+    c_z = c_init
     
     verbose && println("🔄 Starting restoration phase...")
     params.debugverbose && println("DEBUG: Initial state - δ=$δ, norm_h_init=$norm_h_init, c_target=$c_target, eps_c=$eps_c")
@@ -367,8 +165,6 @@ function restoration_phase(
     # Outer Loop (Iterations ℓ)
     while ℓ < params.max_iter_resto
         
-        h_z = problem.h(buffers.z_temp)
-        c_z = 0.5 * norm(h_z)^2
         # || P_Ω(z - ∇c(z)) - z ||
         A_z = problem.∇h(buffers.z_temp)
         grad_c = A_z' * h_z
@@ -388,7 +184,7 @@ function restoration_phase(
             end
             
             z .= buffers.z_temp
-            return buffers.z_temp, δ, true
+            return buffers.z_temp, δ, true, h_z
         end
         # =========================================================
         # Step 4: Inner loop initialization j <- 0 and choose δ
@@ -419,14 +215,18 @@ function restoration_phase(
                 reduction_threshold = params.αR * step_norm_sq
                 is_accepted = c_new <= c_z - reduction_threshold
                 # Logging
-                log_entry = StepLog_TwoPhase(
-                    iterglobal, copy(buffers.z_old), copy(buffers.z_temp), 
-                    is_accepted ? :accepted : :rejected, :restoration, δ, 0.0, 0.0
-                )
-                push!(full_log, log_entry)
+                if history
+                    log_entry = StepLog_TwoPhase(
+                        iterglobal, copy(buffers.z_old), copy(buffers.z_temp), 
+                        is_accepted ? :accepted : :rejected, :restoration, δ, 0.0, 0.0
+                    )
+                    push!(full_log, log_entry)
+                end
                 if is_accepted
                     success_step = true
                     c_prev = c_z
+                    h_z = h_new
+                    c_z = c_new
                     break 
                 else
                     # Rejection: State restoration and strict trust region reduction
@@ -444,7 +244,7 @@ function restoration_phase(
         if !success_step || j >= params.max_iter_resto
             verbose && println("⚠️ Restoration failure at iteration $ℓ (Too many inner iterations)")
             z .= buffers.z_temp
-            return z, δ, false
+            return z, δ, false, h_z
         end
         # =========================================================
         # Step 7: Adaptive trust region update
@@ -462,126 +262,12 @@ function restoration_phase(
     end 
 
     z .= buffers.z_temp
-    return z, δ, ℓ < params.max_iter_resto
-end
-
-# Calculates trust region radius using quadratic interpolation models
-function parabolic_heuristic_step!(
-    δ_current::Union{Float64, Vector{Float64}},
-    f_current::Float64,
-    f_new::Float64,
-    slope::Float64,
-    params,
-    s_norm::Float64,
-    step_norm_sq::Float64,
-    action::Symbol=:decrease;
-
-    anisotropic::Bool=false,
-    s_vec::Vector{Float64}=Float64[],
-    grad::Vector{Float64}=Float64[],
-    grad_old::Vector{Float64}=Float64[],
-    mode::Symbol=:shrink, 
-
-    min_reduction_ratio::Float64=0.1,
-    max_reduction_ratio::Float64=0.5,
-    min_increase_ratio::Float64=1.0,
-    max_increase_ratio::Float64=2.0,
-)
-    # Isotropic behavior execution block
-    if !anisotropic || !(δ_current isa Vector)
-        δ_scalar = (δ_current isa Vector) ? maximum(δ_current) : δ_current
-        b_global = slope
-        a_global = f_new - f_current - slope
-        safe_size = 1.0
-        if action == :increase
-            local_max = (step_norm_sq < δ_scalar^2) ? 2.0 : max_increase_ratio
-            if a_global <= params.ratio_safeguard_tol
-                safe_size = local_max
-            else
-                theo = -b_global / (2.0 * a_global)
-                safe_size = clamp(theo, min_increase_ratio, local_max)
-            end
-            else # :decrease
-                if a_global < params.ratio_safeguard_tol
-                    fallback = max(δ_scalar * params.τ1, s_norm * params.τ2)
-                    d_val = clamp(fallback, params.δmin, params.δmax)
-                    return (δ_current isa Vector) ? fill(d_val, length(δ_current)) : d_val
-                end
-            theo = -b_global / (2.0 * a_global)
-            safe_size = clamp(theo, min_reduction_ratio, max_reduction_ratio)
-        end
-        δ_val = clamp(safe_size * δ_scalar, params.δmin, params.δmax)
-        return (δ_current isa Vector) ? fill(δ_val, length(δ_current)) : δ_val
-
-    end
-    # Anisotropic calculation setup
-    n = length(δ_current)
-    δ_new = copy(δ_current)
-    multipliers = zeros(n)
-    # Phase A: Computation of directional multipliers
-    for i in 1:n
-        b_i = grad[i] * s_vec[i]
-        a_i = f_new - f_current - b_i
-        if a_i < params.ratio_safeguard_tol
-            multipliers[i] = (action == :increase) ? max_increase_ratio : 1.0
-        else
-            multipliers[i] = -b_i / (2.0 * a_i)
-        end
-    end
-    # Phase B: Strategy application
-    has_history = !isempty(grad_old) && length(grad_old) == n
-    if action == :decrease
-        if mode == :reshape
-            # Strategy 1: Alter aspect ratio (Reshape)
-            val_max, idx_max = findmax(multipliers)
-
-            for i in 1:n
-                if i == idx_max
-                    multipliers[i] = 1.0 
-                else
-
-                    multipliers[i] = clamp(multipliers[i], min_reduction_ratio, max_reduction_ratio)
-                end
-            end
-            if params.verbose_out
-                @printf("   [Reshape] Scale altered: Dim %d maintained. Others reduced.\n", idx_max)
-            end
-        elseif mode == :shrink
-            # Strategy 2: Uniform shrink maintaining proportions
-            b_global = slope
-            a_global = f_new - f_current - slope
-            
-
-            if a_global < params.ratio_safeguard_tol
-                uniform_ratio = max_reduction_ratio
-            else
-                theo = -b_global / (2.0 * a_global)
-                uniform_ratio = clamp(theo, min_reduction_ratio, max_reduction_ratio)
-            end
-            
-
-            fill!(multipliers, uniform_ratio)
-            if params.verbose_out
-                @printf("   [Uniform Shrink] Scale maintained: Global multiplier at %.2f\n", uniform_ratio)
-            end
-        end
-    else 
-        for i in 1:n
-            multipliers[i] = clamp(multipliers[i], min_increase_ratio, max_increase_ratio)
-        end
-    end
-    # Phase C: State update application
-    δ_new .= clamp.(δ_current .* multipliers, params.δmin, params.δmax)
-    if params.verbose_out
-        vec_str = string("[", join([@sprintf("%.2f", x) for x in multipliers], ", "), "]")
-        @printf("   [Aniso %s] Multipliers: %s\n", string(action), vec_str)
-    end
-    return δ_new
+    return z, δ, ℓ < params.max_iter_resto, h_z
 end
 
 # Solves the tangent step optimization subproblem
 # min ∇f'·s  s.t. ∇h'·s = -h, bounds
-function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::Union{Float64, Vector{Float64}}, problem::OptimizationProblem, buffers::OptimizedBuffers, params::TwoPhaseParams, B::Union{AbstractMatrix, Nothing})
+function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::T, problem::OptimizationProblem, buffers::OptimizedBuffers, params::TwoPhaseParams, B::Union{AbstractMatrix, Nothing}) where {T<:Union{Float64, Vector{Float64}}}
     m = length(buffers.h_old)
     grad_L = buffers.∇f + transpose(buffers.∇h) * buffers.λ
     
@@ -648,7 +334,9 @@ function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::Union{Flo
     if params.use_quadratic
         @objective(model, Min, 0.5 * dot(s, Hqp * s) + dot(buffers.∇f, s))
     else
-        @objective(model, Min, dot(grad_L, s))
+        @inbounds for j in 1:n
+            set_objective_coefficient(model, s[j], grad_L[j])
+        end
     end
 
     @inbounds for i in 1:m
@@ -695,7 +383,12 @@ function optimization_phase(
     full_log::Vector{StepLog_TwoPhase}=Vector{StepLog_TwoPhase}(),
     iterglobal::Int,
     lagrangian_history::Vector{Float64}=Float64[],
-    merit_history::Vector{Float64}=Float64[]
+    merit_history::Vector{Float64}=Float64[],
+    history::Bool=true,
+    F_y::Float64=NaN,
+    h_y::Union{Vector{Float64}, Nothing}=nothing,
+    F_xk::Float64=NaN,
+    h_xk::Union{Vector{Float64}, Nothing}=nothing
 )
 
     # =========================================================
@@ -703,23 +396,27 @@ function optimization_phase(
     # =========================================================
     j = 0
     n = length(y)
-    m = length(problem.h(y))
+    m = problem.ncon
     θ = θ_k
     consecutive_rejects = 0
 
     buffers.x_temp .= y
-    F_y = problem.f(y)
-    h_y = problem.h(y)
-    norm_h_y = norm(h_y)
+    F_y_val = isnan(F_y) ? problem.f(y) : F_y
+    h_y_val = h_y === nothing ? problem.h(y) : h_y
+    norm_h_y = norm(h_y_val)
     
 
-    F_xk = problem.f(x_k)
-    h_xk = problem.h(x_k)
-    params.debugverbose && println("🔍 [DEBUG-OPT] Initial state: F(y^k)=$F_y, ||h(y^k)||=$norm_h_y, δ=$δ")
+    F_xk_val = isnan(F_xk) ? problem.f(x_k) : F_xk
+    h_xk_val = h_xk === nothing ? problem.h(x_k) : h_xk
+    params.debugverbose && println("🔍 [DEBUG-OPT] Initial state: F(y^k)=$F_y_val, ||h(y^k)||=$norm_h_y, δ=$δ")
     params.debugverbose && println("🔍 [DEBUG-OPT] History sizes - Lagrangian: $(length(lagrangian_history)), Merit: $(length(merit_history))")
 
     buffers.∇f = problem.∇f(buffers.x_temp)
     buffers.∇h = problem.∇h(buffers.x_temp)
+
+    local F_ret = F_y_val
+    local h_ret = h_y_val
+    local grad_ret = copy(buffers.∇f)
     # Main optimization iteration loop
     while j < params.max_iter_opt
         params.debugverbose && println("\n🔍 [DEBUG-OPT] === Iteration j=$j started ===")
@@ -751,7 +448,7 @@ function optimization_phase(
         # Step 4: Lagrangian descent evaluation
         # L(z^j, λ) ≤ L(y^k, λ) - α_L ||z^j - y^k||^2
         # =========================================================
-        L_y_lambda = F_y + dot(buffers.λ, h_y) 
+        L_y_lambda = F_y_val + dot(buffers.λ, h_y_val) 
         L_zj_lambda = F_zj + dot(buffers.λ, h_zj)
         # Non-Monotonic Lagrangian Heuristic
         ref_lagrangian = isempty(lagrangian_history) ? L_y_lambda : max(L_y_lambda, maximum(lagrangian_history))
@@ -766,16 +463,18 @@ function optimization_phase(
             gap = L_zj_lambda - lagrangian_threshold
             params.debugverbose && println("🚫 [DEBUG-OPT] REJECTED by Lagrangian! L(z^j) is $gap ABOVE the threshold.")
 
-            push!(full_log, StepLog_TwoPhase(
-                iterglobal, copy(buffers.x_old), copy(buffers.x_temp), 
-                :rejected, :optimization, δ, L_zj_lambda, compute_merit_functions(buffers.λ, θ_k, h_zj, F_zj)
-            ))
+            if history
+                push!(full_log, StepLog_TwoPhase(
+                    iterglobal, copy(buffers.x_old), copy(buffers.x_temp), 
+                    :rejected, :optimization, δ, L_zj_lambda, compute_merit_functions(buffers.λ, θ_k, h_zj, F_zj)
+                ))
+            end
             consecutive_rejects += 1
             buffers.x_temp .= buffers.x_old # Take back de old step
             
             if params.use_unif_stopping && ((δ isa Vector) ? maximum(δ) : δ) <= params.δmin
                 verbose && println("⚠️ δ too small, aborting optimization")
-                return y, buffers.λ, θ_k, δ, false
+                return y, buffers.λ, θ_k, δ, false, F_y_val, h_y_val, buffers.∇f
             end
             # Trust region reduction post-rejection
             if !params.parabolic_heuristic
@@ -819,10 +518,10 @@ function optimization_phase(
         # =========================================================
         # Step 5: Penalty parameter θ updates
         # =========================================================
-        L_x_lambda_k = F_xk + dot(λ_k, h_xk)
+        L_x_lambda_k = F_xk_val + dot(λ_k, h_xk_val)
         
-        Phi_y_thetak = compute_merit_functions(buffers.λ, θ_k, h_y, F_y)
-        Phi_xk_thetak = compute_merit_functions(λ_k, θ_k, h_xk, F_xk)
+        Phi_y_thetak = compute_merit_functions(buffers.λ, θ_k, h_y_val, F_y_val)
+        Phi_xk_thetak = compute_merit_functions(λ_k, θ_k, h_xk_val, F_xk_val)
         # # Non-Monotonic Heuristic for Theta's test
         ref_merit_thetak = isempty(merit_history) ? Phi_xk_thetak : max(Phi_xk_thetak, maximum(merit_history))
         params.debugverbose && println("🔍 [DEBUG-OPT] --- Theta Update ---")
@@ -839,7 +538,7 @@ function optimization_phase(
             params.debugverbose && println("🔍 [DEBUG-OPT] Numerator: $numerador, Denominator: $denominador")
             
             if abs(denominador) > 1e-12
-                θ = numerador / denominador
+                θ = clamp(numerador / denominador, params.θmin, θ_k)
             else
                 params.debugverbose && println("⚠️ [DEBUG-OPT] Denominator too small, falling back to θ_k.")
                 θ = θ_k
@@ -851,7 +550,7 @@ function optimization_phase(
         # Φ(z^j, λ, θ) ≤ Φ(x^k, λ^k, θ) - α_Φ ||h(x^k)||
         # =========================================================
         Phi_zj_theta = compute_merit_functions(buffers.λ, θ, h_zj, F_zj)
-        Phi_xk_theta = compute_merit_functions(λ_k, θ, h_xk, F_xk)
+        Phi_xk_theta = compute_merit_functions(λ_k, θ, h_xk_val, F_xk_val)
         # Non-Monotonic Heuristic for Final Merit
         ref_merit_theta = isempty(merit_history) ? Phi_xk_theta : max(Phi_xk_theta, maximum(merit_history))
         merit_threshold = ref_merit_theta - params.αΦ * norm_h_xk
@@ -860,11 +559,13 @@ function optimization_phase(
         params.debugverbose && println("🔍 [DEBUG-OPT] Ref Φ(x^k, θ): $ref_merit_theta")
         params.debugverbose && println("🔍 [DEBUG-OPT] Threshold to beat: $merit_threshold")
 
-        push!(full_log, StepLog_TwoPhase(
-            iterglobal, copy(buffers.x_old), copy(buffers.x_temp), 
-            Phi_zj_theta > merit_threshold ? :rejected : :accepted, 
-            :optimization, δ, L_zj_lambda, Phi_zj_theta
-        ))
+        if history
+            push!(full_log, StepLog_TwoPhase(
+                iterglobal, copy(buffers.x_old), copy(buffers.x_temp), 
+                Phi_zj_theta > merit_threshold ? :rejected : :accepted, 
+                :optimization, δ, L_zj_lambda, Phi_zj_theta
+            ))
+        end
         if Phi_zj_theta > merit_threshold
             # -- Step 6 FAILS --
             gap_merit = Phi_zj_theta - merit_threshold
@@ -873,7 +574,7 @@ function optimization_phase(
             buffers.x_temp .= buffers.x_old 
             if params.use_unif_stopping && ((δ isa Vector) ? maximum(δ) : δ) <= params.δmin + 1e-9
                 params.debugverbose && println("⚠️ δ too small, aborting optimization")
-                return y, buffers.λ, θ, δ, false
+                return y, buffers.λ, θ, δ, false, F_ret, h_ret, grad_ret
             end
             δ_old = copy(δ)
             δ = clamp.(δ .* params.τ2, params.δmin, params.δmax)
@@ -892,6 +593,9 @@ function optimization_phase(
 
         ∇f_new_accepted = problem.∇f(buffers.x_temp)
         # buffers.∇f_old .= ∇f_new_accepted
+        F_ret = F_zj
+        h_ret = h_zj
+        grad_ret = ∇f_new_accepted
         
         # Trust region expansion
         if !params.parabolic_heuristic
@@ -928,7 +632,7 @@ function optimization_phase(
     y .= buffers.x_temp
     success = j < params.max_iter_opt
     params.debugverbose && println("🏁 [DEBUG-OPT] Optimization phase finished. Success: $success. Total inner iters: $j")
-    return y, buffers.λ, θ, δ, success
+    return y, buffers.λ, θ, δ, success, F_ret, h_ret, grad_ret
 end
 
 # Main wrapper algorithm orchestrating restoration and optimization (Algorithm 4.3)
@@ -955,7 +659,7 @@ function two_phase_optimization(
             println("  rfeas = $(params.rfeas)")
         end
         n = length(x0)
-        m = length(problem.h(x0))
+        m = problem.ncon
 
         x = clamp.(copy(x0), problem.xl, problem.xu)
         λ = zeros(m)
@@ -978,7 +682,7 @@ function two_phase_optimization(
         if history
             x_hist[1] = copy(x)
         end
-        full_log = Vector{StepLog_TwoPhase}()
+        full_log = history ? Vector{StepLog_TwoPhase}() : StepLog_TwoPhase[]
         # === Initialization of Non-Monotonic Buffers ===
         history_size = params.non_monotone_M
         lagrangian_history = Float64[]
@@ -996,11 +700,6 @@ function two_phase_optimization(
         # Initial solution optimality check
         # ====================================================================
         jac_h = problem.∇h(x)
-        Lgrad = buffers.∇f_old + jac_h' * λ
-        gradpbox = clamp.(x .- Lgrad, problem.xl, problem.xu) .- x
-
-        jac_h = problem.∇h(x)
-        
         gradpbox = compute_gradient_projection(
             x, buffers.∇f_old, jac_h, λ, problem.xl, problem.xu;
             norm_type = params.norm_gpnorm,
@@ -1022,8 +721,10 @@ function two_phase_optimization(
             println("  gpnorm = $gpnorm")
         end
         if (gpnorm < params.tolG) && (norm_h_current < tolerance)
-            log_message!("✅ INITIAL SOLUTION IS OPTIMAL!", logio; verbose=verbose)
-            log_message!("   KKT conditions are satisfied.", logio; verbose=verbose)
+            if verbose || logio !== nothing
+                log_message!("✅ INITIAL SOLUTION IS OPTIMAL!", logio; verbose=verbose)
+                log_message!("   KKT conditions are satisfied.", logio; verbose=verbose)
+            end
             if params.use_unif_stopping
                 countG = params.maxcount
                 countF = params.maxcount
@@ -1035,25 +736,27 @@ function two_phase_optimization(
         model_restaura = create_optimized_model(solver_choice, :restauracao, n, m; env=GRB_ENV)
         model_opt = create_optimized_model(solver_choice, :otimizacao, n, m; env=GRB_ENV)
         # Table header
-        log_message!(repeat("=", 120), logio; verbose=verbose)
-        log_message!("                    TWO-PHASE OPTIMIZATION - ALGORITHM 4.3", logio; verbose=verbose)
-        log_message!(repeat("=", 120), logio; verbose=verbose)
-        if params.use_unif_stopping
-            msg = @sprintf("%-4s %-12s %-10s %-8s %-8s %-9s %-10s %-10s %-18s", "k", "f(xᵏ)", "||h(xᵏ)||", "δr", "δo", "||λ||", "||Δx||", "||gpnorm||", "(G|F|S)")
-        else
-            msg = @sprintf("%-4s %-12s %-10s %-8s %-8s %-9s %-10s  %-10s", "k", "f(xᵏ)", "||h(xᵏ)||", "δr", "δo", "||λ||", "||gpnorm||", "||Δx||")
+        if verbose || logio !== nothing
+            log_message!(repeat("=", 120), logio; verbose=verbose)
+            log_message!("                    TWO-PHASE OPTIMIZATION - ALGORITHM 4.3", logio; verbose=verbose)
+            log_message!(repeat("=", 120), logio; verbose=verbose)
+            if params.use_unif_stopping
+                msg = @sprintf("%-4s %-12s %-10s %-8s %-8s %-9s %-10s %-10s %-18s", "k", "f(xᵏ)", "||h(xᵏ)||", "δr", "δo", "||λ||", "||Δx||", "||gpnorm||", "(G|F|S)")
+            else
+                msg = @sprintf("%-4s %-12s %-10s %-8s %-8s %-9s %-10s  %-10s", "k", "f(xᵏ)", "||h(xᵏ)||", "δr", "δo", "||λ||", "||gpnorm||", "||Δx||")
+            end
+            log_message!(msg, logio; verbose=verbose)
+            log_message!(repeat("-", 120), logio; verbose=verbose)
+            d_r_print = (δr isa Vector) ? maximum(δr) : δr
+            d_o_print = (δo isa Vector) ? maximum(δo) : δo
+            lambda_print_init = norm(λ)
+            if params.use_unif_stopping
+                msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10s %-10.3e %-18s", 0, f_current, norm_h_current, d_r_print, d_o_print, lambda_print_init, "-", gpnorm, "0|0|0")
+            else
+                msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10s", 0, f_current, norm_h_current, d_r_print, d_o_print, lambda_print_init, gpnorm, "-")
+            end
+            log_message!(msg, logio; verbose=verbose)
         end
-        log_message!(msg, logio; verbose=verbose)
-        log_message!(repeat("-", 120), logio; verbose=verbose)
-        d_r_print = (δr isa Vector) ? maximum(δr) : δr
-        d_o_print = (δo isa Vector) ? maximum(δo) : δo
-        lambda_print_init = norm(λ)
-        if params.use_unif_stopping
-            msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10s %-10.3e %-18s", 0, f_current, norm_h_current, d_r_print, d_o_print, lambda_print_init, "-", gpnorm, "0|0|0")
-        else
-            msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10s", 0, f_current, norm_h_current, d_r_print, d_o_print, lambda_print_init, gpnorm, "-")
-        end
-        log_message!(msg, logio; verbose=verbose)
         # Main loop (Algorithm 4.3)
         while iter < max_outer_iter
             
@@ -1065,21 +768,27 @@ function two_phase_optimization(
 
                 unif_converged_step = (countS >= params.maxcount && is_feasible) 
                 if unif_converged_kkt || unif_converged_step
-                    log_message!("-" ^ 120, logio; verbose=verbose)
-                    if unif_converged_kkt
-                        log_message!("✅ CONVERGENCE - KKT CONDITIONS: Small gradient, reduction, and constraint violation", logio; verbose=verbose)
-                    else
-                        log_message!("✅ CONVERGENCE - SMALL STEP: Sufficiently small step at a feasible point", logio; verbose=verbose)
+                    if verbose || logio !== nothing
+                        log_message!("-" ^ 120, logio; verbose=verbose)
+                        if unif_converged_kkt
+                            log_message!("✅ CONVERGENCE - KKT CONDITIONS: Small gradient, reduction, and constraint violation", logio; verbose=verbose)
+                        else
+                            log_message!("✅ CONVERGENCE - SMALL STEP: Sufficiently small step at a feasible point", logio; verbose=verbose)
+                        end
                     end
                     break
                 elseif (countG >= params.maxcount || countS >= params.maxcount) && !is_feasible
-                    log_message!("⚠️ WARNING: Algorithm stagnated at an infeasible point (||h(x)|| = $norm_h_current)", logio; verbose=verbose)
+                    if verbose || logio !== nothing
+                        log_message!("⚠️ WARNING: Algorithm stagnated at an infeasible point (||h(x)|| = $norm_h_current)", logio; verbose=verbose)
+                    end
                 end
             else
                 #UNIF OFF, stop if KKT
                 if norm_h_current < tolerance && gpnorm < params.tolG
-                    log_message!("-" ^ 120, logio; verbose=verbose)
-                    log_message!("✅ CONVERGENCE: Exact KKT solution found", logio; verbose=verbose)
+                    if verbose || logio !== nothing
+                        log_message!("-" ^ 120, logio; verbose=verbose)
+                        log_message!("✅ CONVERGENCE: Exact KKT solution found", logio; verbose=verbose)
+                    end
                     break
                 end
             end
@@ -1095,40 +804,51 @@ function two_phase_optimization(
             # Step 1: RESTORATION PHASE
             # ================================================================
             if norm_h_current > tolerance
-                y, δr, success_resto = restoration_phase(problem, x, δr, model_restaura; params=params, buffers=buffers, full_log=full_log, iterglobal=iter)
-                norm_h_y = norm(problem.h(y))
+                y, δr, success_resto, h_resto = restoration_phase(problem, x, δr, model_restaura; params=params, buffers=buffers, full_log=full_log, iterglobal=iter, history=history)
+                norm_h_y = norm(h_resto)
                 if norm_h_y > params.r_resto * norm_h_old
-                    log_message!("❌ FAILURE: ||h(yᵏ)|| > r||h(xᵏ)|| - Insufficient restoration", logio; verbose=verbose)
+                    if verbose || logio !== nothing
+                        log_message!("❌ FAILURE: ||h(yᵏ)|| > r||h(xᵏ)|| - Insufficient restoration", logio; verbose=verbose)
+                    end
                     if history
                         x_hist[iter + 2] = copy(y)
                     end
                     return y, λ, θ, iter, 3, history ? x_hist[1:(iter + 2)] : nothing, full_log
                 end
+                F_y_pass = NaN
+                h_y_pass = h_resto
             else
                 y = copy(x)
                 success_resto = true
+                F_y_pass = f_current
+                h_y_pass = h_current
             end
             # ================================================================
             # Step 2: OPTIMIZATION PHASE
             # ================================================================
 
-            x_new, λ_new, θ_new, δo, success_opt = optimization_phase(
-            problem, 
-            x_old_outer,      
-            λ,                
-            norm_h_old,       
-            y,                
-            δo, 
-            model_opt, 
-            params; 
-            B = B,        
-            θ_k = θ,          
-            verbose = params.verbose_in, 
-            buffers = buffers, 
-            full_log = full_log, 
-            iterglobal = iter,
-            lagrangian_history = lagrangian_history,
-            merit_history = merit_history
+            x_new, λ_new, θ_new, δo, success_opt, f_opt_new, h_opt_new, grad_f_opt_new = optimization_phase(
+                problem, 
+                x_old_outer,      
+                λ,                
+                norm_h_old,       
+                y,                
+                δo, 
+                model_opt, 
+                params; 
+                B = B,        
+                θ_k = θ,          
+                verbose = params.verbose_in, 
+                buffers = buffers, 
+                full_log = full_log, 
+                iterglobal = iter,
+                lagrangian_history = lagrangian_history,
+                merit_history = merit_history,
+                history = history,
+                F_y = F_y_pass,
+                h_y = h_y_pass,
+                F_xk = f_current,
+                h_xk = h_current
             )
             # ================================================================
             # Step 3: UPDATE AND LOG
@@ -1137,14 +857,14 @@ function two_phase_optimization(
             λ .= λ_new
             θ = θ_new
             
-            f_new = problem.f(x)
-            h_new = problem.h(x)
+            f_new = f_opt_new
+            h_new = h_opt_new
             norm_h_new = norm(h_new)
             Δx = norm(x - x_old_outer, Inf)
             ΔF = abs(f_new - f_current)
             
             # --- Recalculate Gradients at new point ---
-            grad_f_new = problem.∇f(x)
+            grad_f_new = grad_f_opt_new
             jac_h_new = problem.∇h(x)
             Lgrad = grad_f_new + jac_h_new' * λ
 
@@ -1231,16 +951,18 @@ function two_phase_optimization(
                     status_symbol = " ⚠️δo"
                 end
             end
-            d_r_print = (δr isa Vector) ? maximum(δr) : δr
-            d_o_print = (δo isa Vector) ? maximum(δo) : δo 
-            lambda_print = norm(λ)
+            if verbose || logio !== nothing
+                d_r_print = (δr isa Vector) ? maximum(δr) : δr
+                d_o_print = (δo isa Vector) ? maximum(δo) : δo 
+                lambda_print = norm(λ)
 
-            if params.use_unif_stopping
-                msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10.3e %d|%d|%d%s", iter, f_new, norm_h_new, d_r_print, d_o_print, lambda_print, Δx, gpnorm, countG, countF, countS, status_symbol)
-            else
-                msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10.3e %s", iter, f_new, norm_h_new, d_r_print, d_o_print, lambda_print, gpnorm, Δx, status_symbol)
+                if params.use_unif_stopping
+                    msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10.3e %d|%d|%d%s", iter, f_new, norm_h_new, d_r_print, d_o_print, lambda_print, Δx, gpnorm, countG, countF, countS, status_symbol)
+                else
+                    msg = @sprintf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-9.2e %-10.3e %-10.3e %s", iter, f_new, norm_h_new, d_r_print, d_o_print, lambda_print, gpnorm, Δx, status_symbol)
+                end
+                log_message!(msg, logio; verbose=verbose)
             end
-            log_message!(msg, logio; verbose=verbose)
             f_current = f_new
             h_current = h_new
             norm_h_current = norm_h_new
@@ -1248,7 +970,9 @@ function two_phase_optimization(
         # ================================================================
         # FINALIZATION
         # ================================================================
-        log_message!(repeat("=", 120), logio; verbose=verbose)
+        if verbose || logio !== nothing
+            log_message!(repeat("=", 120), logio; verbose=verbose)
+        end
         opstop = if params.use_unif_stopping
             if countG >= params.maxcount && countF >= params.maxcount && norm_h_current < tolerance
                 0
@@ -1288,14 +1012,16 @@ function two_phase_optimization(
                 "⚠️ TERMINATION: Alternative criterion"
             end
         end
-        log_message!(termination_msg, logio; verbose=verbose)
-        log_message!("Optimization finished after $iter iterations.", logio; verbose=verbose)
-        log_message!("🎉 Final result:", logio; verbose=verbose)
-        log_message!(@sprintf("   f(x*) = %.6e", f_current), logio; verbose=verbose)
-        log_message!(@sprintf("   ||h(x*)|| = %.2e", norm_h_current), logio; verbose=verbose)
-        d_r_print = (δr isa Vector) ? maximum(δr) : δr
-        d_o_print = (δo isa Vector) ? maximum(δo) : δo
-        log_message!(@sprintf("   δr (max) = %.2e, δo (max) = %.2e", d_r_print, d_o_print), logio; verbose=verbose)
+        if verbose || logio !== nothing
+            log_message!(termination_msg, logio; verbose=verbose)
+            log_message!("Optimization finished after $iter iterations.", logio; verbose=verbose)
+            log_message!("🎉 Final result:", logio; verbose=verbose)
+            log_message!(@sprintf("   f(x*) = %.6e", f_current), logio; verbose=verbose)
+            log_message!(@sprintf("   ||h(x*)|| = %.2e", norm_h_current), logio; verbose=verbose)
+            d_r_print = (δr isa Vector) ? maximum(δr) : δr
+            d_o_print = (δo isa Vector) ? maximum(δo) : δo
+            log_message!(@sprintf("   δr (max) = %.2e, δo (max) = %.2e", d_r_print, d_o_print), logio; verbose=verbose)
+        end
         return x, λ, θ, iter, opstop, history ? x_hist[1:(iter + 1)] : nothing, full_log
               
     finally

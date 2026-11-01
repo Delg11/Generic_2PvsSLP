@@ -1,7 +1,7 @@
 # ==============================================================================
-# Proprietary Software • All Rights Reserved
+# Perfis de Desempenho Baseados no Valor da Função Objetivo Viável (Capítulo 3)
 # ==============================================================================
-module Generic_module_Stats
+module StatsCap3FProfile
 
 export run_statistical_analysis
 
@@ -12,7 +12,7 @@ using Plots
 using Statistics
 
 # ==============================================================================
-# 1. SAR/PH CONFLICT RESOLUTION
+# 1. RESOLUÇÃO DE CONFLITO SAR / PH
 # ==============================================================================
 function remove_redundant_sar_ph_variants(df::DataFrame)
     variants = unique(df.Variant)
@@ -36,22 +36,22 @@ function remove_redundant_sar_ph_variants(df::DataFrame)
 end
 
 # ==============================================================================
-# 2. MAIN STATISTICAL ANALYSIS ROUTINE
+# 2. ROTINA PRINCIPAL DE ANÁLISE ESTATÍSTICA (F-PROFILE)
 # ==============================================================================
 function run_statistical_analysis(results_dir::String)
     println("\n" * "=" ^ 80)
-    println("📊 STARTING CONSOLIDATED ANALYSIS AND STATISTICS")
+    println("📊 INICIANDO ANÁLISE F-PROFILE (CAPÍTULO 3 - TESE)")
     println("=" ^ 80)
 
     slp_file = joinpath(results_dir, "benchmark_slp.csv")
     tp_file   = joinpath(results_dir, "benchmark_twophase.csv")
 
-    println("Loading databases...")
+    println("Carregando bases de dados de: $results_dir ...")
     df_slp = isfile(slp_file) ? CSV.read(slp_file, DataFrame) : DataFrame()
     df_tp   = isfile(tp_file)   ? CSV.read(tp_file, DataFrame)   : DataFrame()
 
     if nrow(df_slp) == 0 && nrow(df_tp) == 0
-        println("⚠️ No data found to process. Exiting analysis.")
+        println("⚠️ Nenhum dado encontrado em $results_dir. Abortando análise.")
         return
     end
 
@@ -59,13 +59,14 @@ function run_statistical_analysis(results_dir::String)
     filter!(r -> !occursin("SQP", r.Variant), df_all)
     df_all = remove_redundant_sar_ph_variants(df_all)
 
-    println("📈 Generating Dolan-Moré Performance Profiles...")
+    println("📈 Gerando Dolan-Moré Performance Profiles (critério f-profile)...")
     generate_tournament_profiles(df_all, results_dir)
-    println("✅ Execution and Analysis complete. Plots saved to: $results_dir")
+    println("✅ Análise f-profile concluída. Gráficos salvos em: $results_dir")
+    println("=" ^ 80)
 end
 
 # ==============================================================================
-# 3. PERFORMANCE PROFILES LOGIC (DOLAN-MORÉ TOURNAMENTS)
+# 3. LÓGICA DOS PERFIS DE DESEMPENHO (DOLAN-MORÉ TOURNAMENTS)
 # ==============================================================================
 function find_best_variant(df::DataFrame, variants::Vector{String})
     isempty(variants) && return nothing
@@ -106,7 +107,7 @@ function generate_tournament_profiles(df::DataFrame, out_dir::String)
         "SLP_SAR0_PH0_ATR0", # 2. Ablação do SAR (SAR 0, PH 0)
         "SLP_SAR1_PH1_ATR0"  # 3. Efeito da Heurística (PH 1, SAR irrelevante)
     ])
-    plot_profile(df, g1, :Time_ms, "Group 1: UNIF - SAR vs PH", joinpath(plots_dir, "Profile_G1_SLP_SAR_PH.png"), color_map)
+    plot_profile(df, g1, :Time_ms, "Group 1: UNIF - SAR vs PH", joinpath(plots_dir, "Profile_G1_SLP_SAR_PH_f_profile.png"), color_map)
 
     # ---------------------------------------------------------
     # GROUP 2: SLP - The Impact of Anisotropy (ATR)
@@ -117,7 +118,7 @@ function generate_tournament_profiles(df::DataFrame, out_dir::String)
         "SLP_SAR0_PH1_ATR0",
         "SLP_SAR0_PH1_ATR1"
     ])
-    plot_profile(df, g2, :Time_ms, "Group 2: UNIF - Anisotropy", joinpath(plots_dir, "Profile_G2_SLP_ATR.png"), color_map)
+    plot_profile(df, g2, :Time_ms, "Group 2: UNIF - Anisotropy", joinpath(plots_dir, "Profile_G2_SLP_ATR_f_profile.png"), color_map)
     
     # ---------------------------------------------------------
     # GROUP 3: Two-Phase - Ratio Strategies (SAR & RRU)
@@ -128,7 +129,7 @@ function generate_tournament_profiles(df::DataFrame, out_dir::String)
         "2P_SAR1_PH0_ATR0_RRU1", # SAR1, RRU1
         "2P_SAR0_PH0_ATR0_RRU1"  # SAR0, RRU1
     ])
-    plot_profile(df, g3, :Time_ms, "Group 3: 2P - Ratio Strategies", joinpath(plots_dir, "Profile_G3_2P_Ratio.png"), color_map)
+    plot_profile(df, g3, :Time_ms, "Group 3: 2P - Ratio Strategies", joinpath(plots_dir, "Profile_G3_2P_Ratio_f_profile.png"), color_map)
     
     # ---------------------------------------------------------
     # GROUP 4: Two-Phase - Step Shapes (PH & ATR)
@@ -138,7 +139,7 @@ function generate_tournament_profiles(df::DataFrame, out_dir::String)
         "2P_SAR1_PH1_ATR0_RRU1",
         "2P_SAR1_PH1_ATR1_RRU1"
     ])
-    plot_profile(df, g4, :Time_ms, "Group 4: 2P - Step Shapes", joinpath(plots_dir, "Profile_G4_2P_Shapes.png"), color_map)
+    plot_profile(df, g4, :Time_ms, "Group 4: 2P - Step Shapes", joinpath(plots_dir, "Profile_G4_2P_Shapes_f_profile.png"), color_map)
 
     # ---------------------------------------------------------
     # GROUP 5: Best UNIF vs Best 2P (Linear Only)
@@ -155,7 +156,7 @@ function generate_tournament_profiles(df::DataFrame, out_dir::String)
     
     g5 = get_existing(unique(g5_variants))
 
-    plot_profile(df, g5, :Time_ms, "Group 5: Best UNIF vs Best 2P", joinpath(plots_dir, "Profile_G5_Best_Linear.png"), color_map)
+    plot_profile(df, g5, :Time_ms, "Group 5: Best UNIF vs Best 2P", joinpath(plots_dir, "Profile_G5_Best_Linear_f_profile.png"), color_map)
 end
 
 const VIVID_PALETTE = [
@@ -277,7 +278,6 @@ function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol
         push!(x_vals, plot_max)
         push!(y_vals, n_solved / n_probs)
 
-        # Atualizado para lidar com as nomenclaturas SLP
         clean_label = replace(s, "SLP_" => "UNIF ", "UNIF_" => "UNIF ", "2P_" => "2P ", "BASE_SLP" => "UNIF SAR1_PH0_ATR0", "BASE_UNIF" => "UNIF SAR1_PH0_ATR0", "BASE_2P" => "2P SAR1_PH0_ATR0_RRU0")
 
         line_color = get(color_map, s, nothing)
@@ -289,7 +289,8 @@ function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol
     end
 
     savefig(p, filename)
-    println("  > Saved: $(basename(filename))")
+    println("  > Gráfico salvo: $(basename(filename))")
 end
 
-end # End of module
+end # module
+

@@ -23,3 +23,6 @@ docs/site/
 # environment.
 Manifest.toml
 src/Stats_cap3.jl
+
+# SBPO papers, presentations and draft manuscripts (confidential / unpublished)
+SBPO*/

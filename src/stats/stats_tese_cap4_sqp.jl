@@ -1,7 +1,7 @@
 # ==============================================================================
 # Proprietary Software • All Rights Reserved
 # ==============================================================================
-module Generic_module_Stats
+module StatsCap4SQP
 
 export run_statistical_analysis
 

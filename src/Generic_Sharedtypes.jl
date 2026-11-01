@@ -1,11 +1,21 @@
 module SharedTypes
 
-export StepLog, StepLog_UNIF, StepLog_TwoPhase, OptimizationProblem, OptimizedBuffers, TwoPhaseParams, UNIFParams, create_rosenbrock_problem0, create_rosenbrock_problem1, build_optimization_problem, GRB_ENV
+export StepLog, StepLog_UNIF, StepLog_TwoPhase, OptimizationProblem, OptimizedBuffers, TwoPhaseParams, UNIFParams, create_rosenbrock_problem0, create_rosenbrock_problem1, build_optimization_problem, GRB_ENV, SMALL_PROBLEMS,
+       enforce_aspect_ratio!, parabolic_heuristic_step!, compute_gradient_projection, get_δ, max_δ
 
-using ADNLPModels, NLPModels, Gurobi
+using ADNLPModels, NLPModels, Gurobi, JuMP, LinearAlgebra, Printf, SparseArrays
 
 # Global environment for Gurobi to prevent license checkout overhead on every iteration
 const GRB_ENV = Gurobi.Env(output_flag=0)
+
+# Trust region helper functions (scalar or vector)
+@inline get_δ(δ::Float64, i::Int) = δ
+@inline get_δ(δ::Vector{Float64}, i::Int) = @inbounds δ[i]
+@inline get_δ(δ::Union{Float64, Vector{Float64}}, i::Int) = (δ isa Vector) ? δ[i] : δ
+
+@inline max_δ(δ::Float64) = δ
+@inline max_δ(δ::Vector{Float64}) = maximum(δ)
+@inline max_δ(δ::Union{Float64, Vector{Float64}}) = (δ isa Vector) ? maximum(δ) : δ
 
 # ==============================================================================
 # LOGGING STRUCTURES
@@ -120,6 +130,7 @@ Base.@kwdef mutable struct TwoPhaseParams
     τ2::Float64 = 0.25              # Trust region contraction factor (moderate)
     τ3::Float64 = 0.5               # Trust region contraction factor (mild)
     θ0::Float64 = 0.9               # Initial penalty parameter weighting
+    θmin::Float64 = 1e-6            # Minimum allowed penalty parameter
     tol::Float64 = 1e-4             # General stopping tolerance
 
     # Optimization Phase Settings
@@ -331,6 +342,325 @@ function build_optimization_problem(nlp::AbstractNLPModel)
         f, ∇f, h, ∇h, ∇²h, c, ∇c, ∇²c, project, prox_grad_c, Lagrangian, merit, ∇²L, 
         x0, y0, xl, xu
     )
+end
+
+# ==============================================================================
+# FAST BENCHMARK TEST SET (SMALL_PROBLEMS)
+# ==============================================================================
+"""
+Vetor de problemas pequenos e representativos do CUTEst para testes e validações rápidas.
+Contém problemas com restrições (m = 1) e sem restrições/cotas (m = 0).
+"""
+const SMALL_PROBLEMS = [
+    # Com restrições (m = 1)
+    "HS6",       # Hock-Schittkowski 6
+    "TRY-B",     # Curvatura pronunciada
+    "HS28",      # Objetivo quadrático, restrição linear
+    "HS26",      # Cúbico com restrição quadrática
+    "HS35MOD",   # Quadrático padrão
+    "EXTRASIM",  # Sanidade de viabilidade
+    "TAME",      # Simples e rápido
+
+    # Sem restrições ou apenas com cotas (m = 0)
+    "ROSENBR",   # Vale da Banana
+    "HS3",       # Quadrático com cotas
+    "HS4",       # Cúbico com cotas
+    "HS45",      # n=5 com cotas
+    "SISSER",    # Vale estreito
+]
+
+# ==============================================================================
+# SHARED OPTIMIZATION UTILITIES (Aspect Ratio, Parabolic Heuristic, GP Norm)
+# ==============================================================================
+
+"""
+Ensures the trust region maintains a healthy minimum aspect ratio.
+If a dimension falls below the threshold relative to the maximum, it is inflated 
+to prevent stagnation in diagonal valleys.
+"""
+function enforce_aspect_ratio!(δ::Vector{Float64}, min_ratio::Float64=1e-3)
+    max_delta = maximum(δ)
+    threshold = max_delta * min_ratio
+    changed = false
+    for i in 1:length(δ)
+        if δ[i] < threshold
+            δ[i] = threshold 
+            changed = true
+        end
+    end
+    return changed
+end
+
+"""
+Calculates trust region radius using quadratic interpolation models (Parabolic Heuristic).
+"""
+function parabolic_heuristic_step!(
+    δ_current::T,
+    f_current::Float64,
+    f_new::Float64,
+    slope::Float64,
+    params,
+    s_norm::Float64,
+    step_norm_sq::Float64,
+    action::Symbol=:decrease;
+
+    anisotropic::Bool=false,
+    s_vec::Vector{Float64}=Float64[],
+    grad::Vector{Float64}=Float64[],
+    grad_old::Vector{Float64}=Float64[],
+    mode::Symbol=:shrink, 
+
+    min_reduction_ratio::Float64=0.1,
+    max_reduction_ratio::Float64=0.5,
+    min_increase_ratio::Float64=1.0,
+    max_increase_ratio::Float64=2.0,
+) where {T<:Union{Float64, Vector{Float64}}}
+    # Isotropic behavior execution block
+    if !anisotropic || !(δ_current isa Vector)
+        δ_scalar = max_δ(δ_current)
+        b_global = slope
+        a_global = f_new - f_current - slope
+        safe_size = 1.0
+        if action == :increase
+            local_max = (step_norm_sq < δ_scalar^2) ? 2.0 : max_increase_ratio
+            if a_global <= params.ratio_safeguard_tol
+                safe_size = local_max
+            else
+                theo = -b_global / (2.0 * a_global)
+                safe_size = clamp(theo, min_increase_ratio, local_max)
+            end
+        else # :decrease
+            if a_global < params.ratio_safeguard_tol
+                fallback = max(δ_scalar * params.τ1, s_norm * params.τ2)
+                d_val = clamp(fallback, params.δmin, params.δmax)
+                return (δ_current isa Vector) ? fill(d_val, length(δ_current)) : d_val
+            end
+            theo = -b_global / (2.0 * a_global)
+            safe_size = clamp(theo, min_reduction_ratio, max_reduction_ratio)
+        end
+        δ_val = clamp(safe_size * δ_scalar, params.δmin, params.δmax)
+        return (δ_current isa Vector) ? fill(δ_val, length(δ_current)) : δ_val
+    end
+
+    # Anisotropic calculation setup
+    n = length(δ_current)
+    δ_new = copy(δ_current)
+    multipliers = zeros(n)
+    # Phase A: Computation of directional multipliers
+    for i in 1:n
+        b_i = grad[i] * s_vec[i]
+        a_i = f_new - f_current - b_i
+        if a_i < params.ratio_safeguard_tol
+            multipliers[i] = (action == :increase) ? max_increase_ratio : 1.0
+        else
+            multipliers[i] = -b_i / (2.0 * a_i)
+        end
+    end
+    # Phase B: Strategy application
+    has_history = !isempty(grad_old) && length(grad_old) == n
+    if action == :decrease
+        if mode == :reshape
+            val_max, idx_max = findmax(multipliers)
+            for i in 1:n
+                if i == idx_max
+                    multipliers[i] = 1.0 
+                else
+                    multipliers[i] = clamp(multipliers[i], min_reduction_ratio, max_reduction_ratio)
+                end
+            end
+            if params.verbose_out
+                @printf("   [Reshape] Scale altered: Dim %d maintained. Others reduced.\n", idx_max)
+            end
+        elseif mode == :shrink
+            b_global = slope
+            a_global = f_new - f_current - slope
+            if a_global < params.ratio_safeguard_tol
+                uniform_ratio = max_reduction_ratio
+            else
+                theo = -b_global / (2.0 * a_global)
+                uniform_ratio = clamp(theo, min_reduction_ratio, max_reduction_ratio)
+            end
+            fill!(multipliers, uniform_ratio)
+            if params.verbose_out
+                @printf("   [Uniform Shrink] Scale maintained: Global multiplier at %.2f\n", uniform_ratio)
+            end
+        end
+    else # :increase
+        for i in 1:n
+            multipliers[i] = clamp(multipliers[i], min_increase_ratio, max_increase_ratio)
+        end
+    end
+    # Phase C: State update application
+    δ_new .= clamp.(δ_current .* multipliers, params.δmin, params.δmax)
+    if params.verbose_out
+        vec_str = string("[", join([@sprintf("%.2f", x) for x in multipliers], ", "), "]")
+        @printf("   [Aniso %s] Multipliers: %s\n", string(action), vec_str)
+    end
+    return δ_new
+end
+
+"""
+Computes projected gradient norm (AGP / GP-norm) with box and equality constraints.
+"""
+function compute_gradient_projection(
+    x::Vector{Float64},
+    Fgrad::Vector{Float64},
+    jac_h::AbstractMatrix{Float64},
+    λ::Vector{Float64},
+    xl::Vector{Float64},
+    xu::Vector{Float64};
+    norm_type::Union{Float64, Int} = Inf,
+    strategy::Symbol=:dykstra,
+    max_iter::Int=500,
+    tol::Float64=1e-8,
+    debug::Bool=false
+)
+    n = length(x)
+    m = size(jac_h, 1)
+    
+    run_lagrangian = (strategy == :lagrangian) || debug
+    run_qp         = (strategy == :qp)         || debug
+    run_dykstra    = (strategy == :dykstra)    || debug
+
+    buf_lag = run_lagrangian ? zeros(n) : Float64[]
+    buf_qp  = run_qp         ? zeros(n) : Float64[]
+    buf_dyk = run_dykstra    ? zeros(n) : Float64[]
+    qp_succeeded = true
+
+    # 1. Método: Lagrangiano (dependente de lambda)
+    if run_lagrangian
+        if m > 0
+            Lgrad = Fgrad .+ jac_h' * λ
+        else
+            Lgrad = Fgrad
+        end
+        for i in 1:n
+            buf_lag[i] = clamp(x[i] - Lgrad[i], xl[i], xu[i]) - x[i]
+        end
+    end
+
+    if run_qp || run_dykstra
+        v = x .- Fgrad
+        b_target = m > 0 ? jac_h * x : Float64[]
+
+        function execute_dykstra!(out_buffer)
+            p_dyk = copy(v)
+            p_old = similar(p_dyk)
+            q = zeros(n)
+            r = zeros(n)
+            y_val = zeros(n)
+            
+            local fact_J
+            local y_plus_r, res, lambda_proj, jac_t_lambda
+            if m > 0
+                J_Jt = jac_h * jac_h'
+                fact_J = lu(J_Jt + 1e-12 * I)
+                y_plus_r = zeros(n)
+                res = zeros(m)
+                lambda_proj = zeros(m)
+                jac_t_lambda = zeros(n)
+            end
+            
+            @inbounds for k in 1:max_iter
+                copyto!(p_old, p_dyk)
+                
+                # Projeção 1: Limites da caixa (Box)
+                for i in 1:n
+                    val = p_dyk[i] + q[i]
+                    y_val_i = clamp(val, xl[i], xu[i])
+                    y_val[i] = y_val_i
+                    q[i] = val - y_val_i
+                end
+                
+                # Projeção 2: Hiperplanos
+                if m > 0
+                    for i in 1:n
+                        y_plus_r[i] = y_val[i] + r[i]
+                    end
+                    mul!(res, jac_h, y_plus_r)
+                    for i in 1:m
+                        res[i] -= b_target[i]
+                    end
+                    ldiv!(lambda_proj, fact_J, res)
+                    mul!(jac_t_lambda, jac_h', lambda_proj)
+                    
+                    for i in 1:n
+                        p_dyk_i = y_plus_r[i] - jac_t_lambda[i]
+                        p_dyk[i] = p_dyk_i
+                        r[i] = y_plus_r[i] - p_dyk_i
+                    end
+                else
+                    copyto!(p_dyk, y_val)
+                end
+                
+                max_diff = 0.0
+                for i in 1:n
+                    diff_i = abs(p_dyk[i] - p_old[i])
+                    if diff_i > max_diff
+                        max_diff = diff_i
+                    end
+                end
+                if max_diff < tol
+                    break
+                end
+            end
+            
+            @inbounds for i in 1:n
+                out_buffer[i] = p_dyk[i] - x[i]
+            end
+        end
+
+        # 2. Método: QP via JuMP
+        if run_qp
+            model = Model(Gurobi.Optimizer)
+            set_silent(model)
+            @variable(model, xl[i] <= p_var[i=1:n] <= xu[i])
+            @objective(model, Min, 0.5 * sum((p_var[i] - v[i])^2 for i in 1:n))
+            
+            if m > 0
+                @constraint(model, jac_h * p_var .== b_target)
+            end
+            
+            optimize!(model)
+            status = termination_status(model)
+            if status == MOI.OPTIMAL || status == MOI.LOCALLY_SOLVED
+                p_opt = value.(p_var)
+                for i in 1:n
+                    buf_qp[i] = p_opt[i] - x[i]
+                end
+            else
+                qp_succeeded = false
+                execute_dykstra!(buf_qp) # Fallback
+            end
+        end
+
+        # 3. Método: Dykstra Nativo
+        if run_dykstra
+            execute_dykstra!(buf_dyk)
+        end
+    end
+
+    if debug
+        n_lag = norm(buf_lag, norm_type)
+        n_qp  = run_qp ? norm(buf_qp, norm_type) : 0.0
+        n_dyk = run_dykstra ? norm(buf_dyk, norm_type) : 0.0
+        
+        println("--- DEBUG: Gradient Projection Comparison ---")
+        @printf("Lagrangian norm : %.8e\n", n_lag)
+        @printf("QP norm         : %.8e%s\n", n_qp, qp_succeeded ? "" : " (FALLBACK: Dykstra usado)")
+        @printf("Dykstra norm    : %.8e\n", n_dyk)
+        println("---------------------------------------------")
+    end
+        
+    if strategy == :lagrangian
+        return buf_lag
+    elseif strategy == :qp
+        return buf_qp
+    elseif strategy == :dykstra
+        return buf_dyk
+    else
+        error("Estratégia inválida: $strategy")
+    end
 end
 
 end

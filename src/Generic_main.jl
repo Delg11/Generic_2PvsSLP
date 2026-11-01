@@ -3,41 +3,13 @@
 # ==============================================================================
 # 1. IMPORTS AND INCLUDES
 # ==============================================================================
-using Pkg
-
-# Activate the environment associated with the directory where this file is saved
-# Pkg.activate(@__DIR__) 
-# Read Manifest.toml and install/precompile all necessary dependencies
-# Pkg.instantiate()
-
-# Make sure ArgParse is added to your environment
-# Pkg.add("ArgParse")
 using ArgParse
-
-using CUTEst
-using LinearAlgebra
-using Printf
-using Statistics
-using DataFrames
-using XLSX
+using Distributed
 using Dates
-using Plots
+using DataFrames
 using CSV
-
-# 1. Load types and export to Main
-include("Generic_Sharedtypes.jl")
-using .SharedTypes
-
-# 2. Safely load the algorithm modules now that Main knows the types
-include("Generic_module_Twophase.jl")
-using .Generic_module_Twophase
-
-include("Generic_module_unif.jl")   
-using .Generic_module_unif
-
-include("Generic_module_Stats.jl")
-using .Generic_module_Stats
-
+using XLSX
+using Plots
 
 # ==============================================================================
 # 2. COMMAND LINE ARGUMENTS CONFIGURATION
@@ -47,13 +19,17 @@ function parse_commandline()
 
     @add_arg_table s begin
         "--mode", "-m"
-            help = "Execution mode: 'test' or 'filter'."
+            help = "Execution mode: 'test', 'small' (fast benchmark on SMALL_PROBLEMS), or 'filter'."
             arg_type = String
             default = "test"
         "--problems", "-p"
             help = "Comma-separated list of problems."
             arg_type = String
             default = "HS6"
+        "--workers", "-w"
+            help = "Number of parallel workers (1 = sequential, 0 = auto-detect cores, N > 1 = custom)."
+            arg_type = Int
+            default = 1
         "--max-var", "-v"
             help = "Maximum number of variables (-1 for no limit)."
             arg_type = Int
@@ -125,6 +101,13 @@ end
 
 args = parse_commandline()
 
+# Carrega ambiente unificado no Master
+include(normpath(joinpath(@__DIR__, "worker_env.jl")))
+include(normpath(joinpath(@__DIR__, "Generic_module_Stats.jl")))
+using .Generic_module_Stats
+include(normpath(joinpath(@__DIR__, "reproducibility.jl")))
+using .Reproducibility
+
 # ==============================================================================
 # 4. GENERAL CONFIGURATION AND ALGORITHM SELECTION
 # ==============================================================================
@@ -133,11 +116,11 @@ println("⚙️  CONFIGURING VARIANTS AND EXPORT ENVIRONMENT")
 println("=" ^ 80)
 
 println("🖥️  System: $(Sys.CPU_THREADS) threads available")
-println("🚀 Julia: Using $(Threads.nthreads()) threads")
+println("🚀 Execution: $(nworkers() > 1 ? "Parallel ($(nworkers()) distributed workers)" : "Sequential (1 worker)")")
 println("-" ^ 80)
 
 const RUN_TWOPHASE = args["run-twophase"]
-const RUN_UNIF      = args["run-unif"]
+const RUN_UNIF     = args["run-unif"]
 
 common_max_iter = 5000
 common_delta0   = 0.1
@@ -148,7 +131,8 @@ common_maxcount = 3
 common_verbose  = false 
 
 current_datetime = Dates.format(now(), "yyyy-mm-dd_HH-MM")
-results_dir = "Benchmark_Results_$(current_datetime)"
+benchmarks_root = normpath(joinpath(@__DIR__, "..", "benchmarks"))
+results_dir = joinpath(benchmarks_root, "Benchmark_Results_$(current_datetime)")
 mkpath(results_dir)
 println("📁 Results directory created: $results_dir")
 
@@ -187,15 +171,10 @@ if RUN_TWOPHASE
     M = 1
     for sar in tp_sar_opts, rru in tp_rru_opts, ph in tp_ph_opts, atr in tp_atr_opts, strat in sqp_strategies
         if !ph && atr continue end
-        if ph && sar continue end # Se PH = true, então SAR = false
+        if ph && sar continue end
         
         use_quad = (strat != :none)
-        
-        # Note: If SQP is active, Isotropic mode only (no ATR) is enforced via UNIF block, 
-        # but kept active here if intended for testing.
-        
         b_strat = use_quad ? strat : :identity
-        
         is_base = (sar && M == 1 && !ph && !atr && !rru && !use_quad)
         
         name = is_base ? "BASE_2P" : "2P_SAR$(Int(sar))_PH$(Int(ph))_ATR$(Int(atr))_RRU$(Int(rru))"
@@ -215,18 +194,14 @@ unif_variants = []
 if RUN_UNIF
     unif_ph_opts  = args["unif-ph"]  == "all" ? [false, true] : (args["unif-ph"]  == "true" ? [true] : [false])
     unif_atr_opts = args["unif-atr"] == "all" ? [false, true] : (args["unif-atr"] == "true" ? [true] : [false])
-
     sqp_strategies = parse_sqp_args(args["unif-sqp"])
-
     unif_sar_opts = args["unif-sar"] == "all" ? [false, true] : (args["unif-sar"] == "true" ? [true] : [false])
 
     for sar in unif_sar_opts, ph in unif_ph_opts, atr in unif_atr_opts, strat in sqp_strategies
-        if !ph && atr continue end # Logical constraint: ATR requires PH
-        if ph && sar continue end # Se PH = true, então SAR = false
+        if !ph && atr continue end
+        if ph && sar continue end
         use_quad = (strat != :none)
-        
         b_strat = use_quad ? strat : :identity
-        
         is_base = (sar && !ph && !atr && !use_quad)
         
         name = is_base ? "BASE_UNIF" : "UNIF_SAR$(Int(sar))_PH$(Int(ph))_ATR$(Int(atr))"
@@ -241,297 +216,218 @@ if RUN_UNIF
     end
 end
 
-# Base in-memory DataFrames
-df_twophase = DataFrame(Problem=String[], nvar=Int[], ncon=Int[], Variant=String[], 
+# Base in-memory DataFrames with Git Commit Provenance
+df_twophase = DataFrame(Problem=String[], Git_Commit=String[], nvar=Int[], ncon=Int[], Variant=String[], 
                         SAR=Bool[], M=Int[], PH=Bool[], ATR=Bool[], RRU=Bool[], Status=String[], 
                         Iterations=Int[], Time_ms=Float64[], f_final=Float64[], h_norm=Float64[], Is_Base=Bool[])
 
-df_unif = DataFrame(Problem=String[], nvar=Int[], ncon=Int[], Variant=String[], 
+df_unif = DataFrame(Problem=String[], Git_Commit=String[], nvar=Int[], ncon=Int[], Variant=String[], 
                    SAR=Bool[], PH=Bool[], ATR=Bool[], Status=String[], Iterations=Int[], 
                    Time_ms=Float64[], f_final=Float64[], h_norm=Float64[], Is_Base=Bool[])
 
 # ==============================================================================
-# 5. PROBLEM SELECTION AND MAIN LOOP
+# 5. PROBLEM SELECTION
 # ==============================================================================
 if args["mode"] == "test"
     problems = String.(split(args["problems"], ","))
-    println("\nTEST mode activated. Analyzing fixed problem list.")
+    println("\nTEST mode activated. Analyzing fixed problem list: $(join(problems, ", "))")
+elseif args["mode"] == "small"
+    problems = copy(SharedTypes.SMALL_PROBLEMS)
+    println("\n🎯 SMALL mode activated. Running fast benchmark on $(length(problems)) problems: $(join(problems, ", "))")
 elseif args["mode"] == "filter"
     println("\nFILTER mode activated. Building query...")
-    
     filters = Dict{Symbol, Int}()
-    
-    print("Filters -> ")
     if args["max-var"] != -1
         filters[:max_var] = args["max-var"]
-        print("Max Var: $(args["max-var"]) | ")
-    else
-        print("Max Var: [No limit] | ")
     end
-    
     if args["max-con"] != -1
         filters[:max_con] = args["max-con"]
-        print("Max Con: $(args["max-con"])")
-    else
-        print("Max Con: [No limit]")
     end
-    println()
-    
     problems = select_sif_problems(; filters...)
 else
-    println("\n❌ ERROR: Invalid mode ('$(args["mode"])'). Use 'test' or 'filter'.")
+    println("\n❌ ERROR: Invalid mode ('$(args["mode"])'). Use 'test', 'small', or 'filter'.")
     exit(1)
 end
 
 println("Total selected problems: $(length(problems))")
-
 if length(problems) == 0
     println("No problems found matching the selected parameters. Exiting.")
     exit(0)
 end
 
-function get_status_string(status_code::Int)
-    if status_code == 0 return "KKT_OK"
-    elseif status_code == 1 return "SMALL_STEP"
-    elseif status_code == 2 return "MAX_IT"
-    elseif status_code == 3 return "INFEASIBLE_STATIONARY"
-    elseif status_code == 4 return "STALLED_INFEASIBLE"
-    else return "UNKNOWN_$(status_code)" end
-end
-
-println("\n🔥 EXECUTING WARM-UP (JIT Precompilation of ALL variants)...")
-try
-    # Using a pure-Julia custom problem to avoid CUTEst DLL locks and Fortran memory overhead
-    nlp_w = SharedTypes.create_rosenbrock_problem1()
-    prob_w = SharedTypes.build_optimization_problem(nlp_w)
-    x0_w = clamp.(nlp_w.meta.x0, prob_w.xl, prob_w.xu)
-
-    if RUN_TWOPHASE && length(twophase_variants) > 0
-        print("  Compiling Two-Phase variants... ")
-        for var in twophase_variants
-            # Run once to force compilation of all code paths (SQP, RipQP, Gurobi, etc.)
-            Generic_module_Twophase.two_phase_optimization(prob_w, x0_w, var.params; history=false)
-        end
-        println("OK")
-    end
-
-    if RUN_UNIF && length(unif_variants) > 0
-        print("  Compiling UNIF variants... ")
-        for var in unif_variants
-            Generic_module_unif.solve_unif_trust_region(prob_w, x0_w, var.params)
-        end
-        println("OK")
-    end
-    
-    println("🧹 Warm-up complete. Pure Julia problem used (No DLL locks).")
-catch e
-    println("⚠️  Warning: Warm-up failed ($e). The first recorded times may be inflated.")
-end
 # ==============================================================================
-# 5.2 MAIN LOOP
+# 5.2 MAIN FUNCTION
 # ==============================================================================
 function main()
-    for prob_name in problems
-        local nlp = nothing
-        try
-            nlp = CUTEstModel{Float64}(prob_name)
-            
-           
-            problem = SharedTypes.build_optimization_problem(nlp)
-            x0 = clamp.(nlp.meta.x0, problem.xl, problem.xu)
-            dim, ncon = nlp.meta.nvar, nlp.meta.ncon
+    benchmark_start_time = now()
+    git_commit_short = Reproducibility.get_git_short_commit()
+    actual_workers = ensure_parallel_workers(args["workers"])
+    is_parallel = actual_workers > 1
 
-            println("\n🚀 PROCESSING: $prob_name [Var: $dim | Con: $ncon]")
+    println("\n" * "=" ^ 80)
+    println("🚀 RUNNING BENCHMARK ACROSS $(length(problems)) PROBLEMS")
+    println("⚙️  Mode: $(is_parallel ? "Parallel ($(nworkers()) distributed workers)" : "Sequential (1 worker)")")
+    println("🔖 Git Commit: $git_commit_short")
+    println("=" ^ 80)
 
-            if RUN_TWOPHASE
-                for var in twophase_variants
-                    print("  [Two-Phase] > $(var.name)... ")
-                    exec_time = @elapsed begin
-                        y, λ, θ, iter, status, hist, log = Generic_module_Twophase.two_phase_optimization(problem, x0, var.params; history=false)
+    if is_parallel
+        # 1. Precompile CUTEst problems sequentially on master to avoid Windows file locks
+        print("🔧 Pre-compiling $(length(problems)) CUTEst problems on master... ")
+        for p in problems
+            try
+                nlp = CUTEstModel{Float64}(p; decode=true)
+                finalize(nlp)
+            catch
+            end
+        end
+        println("OK")
+
+        # 2. Worker warmup
+        print("🔥 Warming up workers (JIT)... ")
+        run_worker_warmup()
+        @sync for w in workers()
+            @async remotecall_fetch(run_worker_warmup, w)
+        end
+        println("OK")
+
+        # 3. Parallel dispatch with pmap
+        total_time = @elapsed begin
+            if length(problems) < nworkers()
+                # Fine-grained parallelization: distribute (problem, variant) tasks to saturate all workers
+                println("⚡ Distributing variant tasks across $(nworkers()) workers (fine-grained load balancing)...")
+                tasks = []
+                for p in problems
+                    if RUN_TWOPHASE
+                        for v in twophase_variants
+                            push!(tasks, (p, :twophase, v))
+                        end
                     end
-                    push!(df_twophase, (prob_name, dim, ncon, var.name, var.SAR, var.M, var.PH, var.ATR, var.RRU, get_status_string(status), iter, exec_time * 1000.0, problem.f(y), norm(problem.h(y)), var.is_base))
-                    println("Done. ($(round(exec_time * 1000, digits=1))ms)")
+                    if RUN_UNIF
+                        for v in unif_variants
+                            push!(tasks, (p, :unif, v))
+                        end
+                    end
+                end
+
+                results = pmap(t -> solve_main_variant_job(t[1], t[2], t[3], false), tasks)
+
+                for (kind, r) in results
+                    isnothing(r) && continue
+                    if kind == :twophase
+                        push!(df_twophase, (r[1], git_commit_short, r[2:end]...))
+                        println("  [Two-Phase] $(r[1]) > $(r[4])... $(r[10]) in $(round(r[12], digits=1))ms")
+                    elseif kind == :unif
+                        push!(df_unif, (r[1], git_commit_short, r[2:end]...))
+                        println("  [UNIF] $(r[1]) > $(r[4])... $(r[8]) in $(round(r[10], digits=1))ms")
+                    end
+                end
+                RUN_TWOPHASE && CSV.write(joinpath(results_dir, "partial_backup_twophase.csv"), df_twophase)
+                RUN_UNIF && CSV.write(joinpath(results_dir, "partial_backup_unif.csv"), df_unif)
+            else
+                # Problem-level parallelization: 1 problem per job (minimizes CUTEst model load overhead)
+                println("⚡ Distributing $(length(problems)) problem batches across $(nworkers()) workers...")
+                results = pmap(p -> solve_main_problem_job(p, twophase_variants, unif_variants, RUN_TWOPHASE, RUN_UNIF, false), problems)
+
+                for (prob_name, (tp_rows, unif_rows)) in zip(problems, results)
+                    println("\n📦 Finished problem: $prob_name")
+                    for r in tp_rows
+                        push!(df_twophase, (r[1], git_commit_short, r[2:end]...))
+                        println("  [Two-Phase] > $(r[4])... $(r[10]) in $(round(r[12], digits=1))ms")
+                    end
+                    for r in unif_rows
+                        push!(df_unif, (r[1], git_commit_short, r[2:end]...))
+                        println("  [UNIF] > $(r[4])... $(r[8]) in $(round(r[10], digits=1))ms")
+                    end
+                    # Incremental backups
+                    RUN_TWOPHASE && CSV.write(joinpath(results_dir, "partial_backup_twophase.csv"), df_twophase)
+                    RUN_UNIF && CSV.write(joinpath(results_dir, "partial_backup_unif.csv"), df_unif)
                 end
             end
+        end
 
-            if RUN_UNIF
-                for var in unif_variants
-                    print("  [UNIF] > $(var.name)... ")
-                    exec_time = @elapsed begin
-                        y, λ, θ, iter, status, hist, log = Generic_module_unif.solve_unif_trust_region(problem, x0, var.params)
+        if !isinteractive()
+            rmprocs(workers())
+        end
+    else
+        # Sequential Execution
+        total_time = @elapsed begin
+            for prob_name in problems
+                local nlp = nothing
+                try
+                    nlp = CUTEstModel{Float64}(prob_name; decode=true)
+                    problem = SharedTypes.build_optimization_problem(nlp)
+                    x0 = clamp.(nlp.meta.x0, problem.xl, problem.xu)
+                    dim, ncon = nlp.meta.nvar, nlp.meta.ncon
+
+                    println("\n🚀 PROCESSING: $prob_name [Var: $dim | Con: $ncon]")
+
+                    if RUN_TWOPHASE
+                        for var in twophase_variants
+                            print("  [Two-Phase] > $(var.name)... ")
+                            exec_time = @elapsed begin
+                                y, λ, θ, iter, status, hist, log = Generic_module_Twophase.two_phase_optimization(problem, x0, var.params; history=false)
+                            end
+                            push!(df_twophase, (prob_name, git_commit_short, dim, ncon, var.name, var.SAR, var.M, var.PH, var.ATR, var.RRU, get_status_string(status), iter, exec_time * 1000.0, problem.f(y), norm(problem.h(y)), var.is_base))
+                            println("Done. ($(round(exec_time * 1000, digits=1))ms)")
+                        end
                     end
-                    push!(df_unif, (prob_name, dim, ncon, var.name, var.SAR, var.PH, var.ATR, get_status_string(status), iter, exec_time * 1000.0, problem.f(y), norm(problem.h(y)), var.is_base))
-                    println("Done. ($(round(exec_time * 1000, digits=1))ms)")
+
+                    if RUN_UNIF
+                        for var in unif_variants
+                            print("  [UNIF] > $(var.name)... ")
+                            exec_time = @elapsed begin
+                                y, λ, θ, iter, status, hist, log = Generic_module_unif.solve_unif_trust_region(problem, x0, var.params)
+                            end
+                            push!(df_unif, (prob_name, git_commit_short, dim, ncon, var.name, var.SAR, var.PH, var.ATR, get_status_string(status), iter, exec_time * 1000.0, problem.f(y), norm(problem.h(y)), var.is_base))
+                            println("Done. ($(round(exec_time * 1000, digits=1))ms)")
+                        end
+                    end
+                catch e
+                    println("❌ ERROR in $prob_name: $e")
+                finally
+                    isnothing(nlp) || finalize(nlp)
+                    RUN_TWOPHASE && CSV.write(joinpath(results_dir, "partial_backup_twophase.csv"), df_twophase)
+                    RUN_UNIF && CSV.write(joinpath(results_dir, "partial_backup_unif.csv"), df_unif)
                 end
             end
-        catch e
-            println("❌ ERROR in $prob_name: $e")
-        finally
-            isnothing(nlp) || finalize(nlp)
-            
-            # Incremental backup to prevent data loss in case of a crash
-            CSV.write(joinpath(results_dir, "partial_backup_twophase.csv"), df_twophase)
-            CSV.write(joinpath(results_dir, "partial_backup_unif.csv"), df_unif)
         end
     end
-end
 
-# main()
-# Run the statistics module
-# Generic_module_Stats.run_statistical_analysis(results_dir)
+    # Save final consolidated files
+    println("\n" * "=" ^ 80)
+    @printf("🏁 Benchmark completed in %.2f seconds\n", total_time)
+    println("💾 Saving final consolidated results...")
+    if RUN_TWOPHASE
+        CSV.write(joinpath(results_dir, "Consolidated_Twophase.csv"), df_twophase)
+    end
+    if RUN_UNIF
+        CSV.write(joinpath(results_dir, "Consolidated_UNIF.csv"), df_unif)
+    end
+    println("Done! Results saved in: $results_dir")
 
-# nlp_w = SharedTypes.create_rosenbrock_problem1()
-# nlp_w = CUTEstModel{Float64}("ROSENBR")
-# prob_w = SharedTypes.build_optimization_problem(nlp_w)
-# x0_w = clamp.(nlp_w.meta.x0, prob_w.xl, prob_w.xu)
-# # Cria os parâmetros com sar=true, M=1, ph=false, atr=false, rru=false, use_quad=true, b_strat=:identity
-# custom_params = build_twophase_params(true, 1, false, false, false, false, :reciprocal)
-
-# # Executa a otimização
-# @time y, λ, θ, iter, status, hist, log = Generic_module_Twophase.two_phase_optimization(prob_w, x0_w, custom_params; history=false)
-
-
-using NLPModelsIpopt
-# ==============================================================================
-# 1. SETUP DO PROBLEMA E VARIÁVEIS COMUNS
-# ==============================================================================
-#  pb=select_sif_problems(; max_var=Inf,  max_con=1)
-# nlp_w = CUTEstModel{Float64}("ROSENBR")
-# nlp_w = SharedTypes.create_rosenbrock_problem1()
-for problem in ["HS6"]
-    println("\n🚀 PROCESSING: $problem")
-    nlp_w = CUTEstModel{Float64}(problem)
-    prob_w = SharedTypes.build_optimization_problem(nlp_w)
-    x0_w = clamp.(nlp_w.meta.x0, prob_w.xl, prob_w.xu)
-
-    common_max_iter = 15
-    common_delta0   = 0.1
-    common_tolG     = 1e-3
-    common_tolF     = 5e-2
-    common_tolS     = 1e-4
-    common_maxcount = 3
-    common_verbose  = true
-
-    # # Executa o Ipopt com fornecimento de Hessiana exata (equivalente ao SQP-EXACT)
-    # tempo_ipopt = @elapsed begin
-    #     stats_ipopt = ipopt(nlp_w, print_level=0)
-    # end
-
-    # println("IPOPT EXACT | Tempo: ", round(tempo_ipopt, digits=5), 
-    #         " | Iter: ", stats_ipopt.iter, 
-    #         " | f(y): ", round(stats_ipopt.objective, digits=8))
-    # tempo_ipopt_bfgs = @elapsed begin
-    # stats_ipopt_bfgs = ipopt(nlp_w, print_level=0, hessian_approximation="limited-memory")
-    # end
-    # println("IPOPT BFGS  | Tempo: ", round(tempo_ipopt_bfgs, digits=5), 
-    #         " | Iter: ", stats_ipopt_bfgs.iter, 
-    #         " | f(y): ", round(stats_ipopt_bfgs.objective, digits=8))
-    # ==============================================================================
-    # 2. DEFINIÇÃO DAS ESTRATÉGIAS
-    # ==============================================================================
-    strategies = [
-        :none, 
-        # :exact, 
-        # :diag_exact,
-        # :identity, 
-        # :spectral, 
-        # :reciprocal, 
-        # :exponential, 
-        # :quasi_newton,
-        # :bfgs
-    ]
-
-    println("\n" * "="^120)
-    println(" TESTANDO ESTRATÉGIAS: TWOPHASE vs UNIF (Rosenbrock)")
-    println("="^120)
-    println(
-        rpad("Estratégia", 18), " | ", 
-        rpad("TP (s)", 8), " | ", rpad("TP It", 5), " | ", rpad("TP f(y)", 12), " | ", rpad("TP y", 15), " | ",
-        rpad("UNIF (s)", 8), " | ", rpad("UNIF It", 7), " | ", rpad("UNIF f(y)", 12), " | ", rpad("UNIF y", 15)
+    # Reproducibility & Environment Metadata
+    println("\n🔬 Generating reproducibility and provenance metadata...")
+    meta = Reproducibility.collect_environment_metadata(
+        mode = args["mode"],
+        workers_count = is_parallel ? nworkers() : 1,
+        start_time = benchmark_start_time
     )
-    println("-"^120)
+    meta["execution"]["end_time"] = Dates.format(now(), "yyyy-mm-ddTHH:MM:SS")
+    meta["execution"]["elapsed_seconds"] = total_time
+    df_meta = Reproducibility.save_reproducibility_artifacts(results_dir, meta)
+    println("   • benchmark_manifest.json (machine-readable)")
+    println("   • ENVIRONMENT_SPECS.md (paper/thesis copy-paste)")
+    println("   • environment_metadata.csv")
 
-    # ==============================================================================
-    # 3. LOOP DE AVALIAÇÃO
-    # ==============================================================================
-    for strat in strategies
-        if strat == :none
-            use_quad = false
-            b_strat = :identity
-            nome_strat = "BASE (sem quad)"
-        else
-            use_quad = true
-            b_strat = strat
-            nome_strat = "SQP-$(uppercase(string(strat)))"
-        end
-
-        # ---------------------------------------------------------
-        # EXECUÇÃO TWOPHASE
-        # ---------------------------------------------------------
-        params_twophase = SharedTypes.TwoPhaseParams(
-            max_outer_iter = common_max_iter, δ0_opt = common_delta0, δ0_resto = common_delta0,
-            tolG = common_tolG, tolF = common_tolF, tolS = common_tolS, maxcount = common_maxcount,
-            verbose_out = true, use_unif_stopping = true, rfeas = 1e-12, δmin = 1e-6, 
-            δmax = 10.0, r_resto = 0.9, τ1 = 0.1, τ2 = 0.25, αL = 1e-6, αR = 1e-4,
-            θ0 = 0.90, max_iter_resto = 500, verbose_in = false, debugverbose = false,
-            strong_agreement_rule = false, non_monotone_M = 1, parabolic_heuristic = false, 
-            anisotropic_trust_region = false, restoration_ratio_update = false,
-            use_quadratic = use_quad, B_update_strategy = b_strat, quadratic_solver = :gurobi, gpnorm_strategy = :dykstra, gpnorm_debug=false
-        )
-        
-        tempo_tp = @elapsed begin
-            y_tp, _, _, iter_tp, _, _, _ = Generic_module_Twophase.two_phase_optimization(prob_w, x0_w, params_twophase; history=false)
-        end
-        f_val_tp = prob_w.f(y_tp)
-        y_tp_str = string(round.(y_tp, digits=2))
-
-        # ---------------------------------------------------------
-        # EXECUÇÃO UNIF (COM TRY/CATCH)
-        # ---------------------------------------------------------
-        params_unif = SharedTypes.UNIFParams(
-            delta0 = common_delta0, tolG = common_tolG, tolF = common_tolF, tolS = common_tolS,
-            maxiter = common_max_iter, maxcount = common_maxcount, verbose = common_verbose,
-            verbose_out = false, debugverbose = false, parabolic_heuristic = true, 
-            anisotropic_trust_region = false, strong_agreement_rule = true, 
-            use_quadratic = use_quad, B_update_strategy = b_strat, quadratic_solver = :gurobi
-        )
-
-        # Pré-alocação para lidar com falhas de implementação no UNIF
-        tempo_unif_str = "Erro"
-        f_val_unif_str = "---"
-        iter_unif_str = "---"
-        y_unif_str = "---"
-
-        # try
-            tempo_unif = @elapsed begin
-                y_unif, _, _, iter_unif, _, _, _ = Generic_module_unif.solve_unif_trust_region(prob_w, x0_w, params_unif)
-            end
-            f_val_unif = prob_w.f(y_unif)
-            
-            tempo_unif_str = string(round(tempo_unif, digits=5))
-            f_val_unif_str = string(round(f_val_unif, digits=8))
-            iter_unif_str = string(iter_unif)
-            y_unif_str = string(round.(y_unif, digits=2))
-        # catch e
-            # Continua silenciando falhas nas estratégias que o UNIF ainda não suporta
-        # end
-
-        # ---------------------------------------------------------
-        # LOG
-        # ---------------------------------------------------------
-        println(
-            rpad(nome_strat, 18), " | ", 
-            rpad(round(tempo_tp, digits=5), 8), " | ", 
-            rpad(iter_tp, 5), " | ",
-            rpad(round(f_val_tp, digits=8), 12), " | ", 
-            rpad(y_tp_str, 15), " | ",
-            rpad(tempo_unif_str, 8), " | ", 
-            rpad(iter_unif_str, 7), " | ",
-            rpad(f_val_unif_str, 12), " | ",
-            rpad(y_unif_str, 15)
-        )
+    # Run statistical analysis
+    try
+        println("\n📊 Generating statistical performance profiles...")
+        Generic_module_Stats.run_statistical_analysis(results_dir, df_meta)
+    catch e
+        println("⚠️ Note: Statistical analysis finished with: $e")
     end
-    println("="^120)
-    finalize(nlp_w)
 end
 
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end

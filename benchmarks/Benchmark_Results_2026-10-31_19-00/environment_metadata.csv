@@ -1,0 +1,33 @@
+Category,Parameter,Value
+Git Provenance,Commit SHA (Short),07d7bd7
+Git Provenance,Commit SHA (Full),07d7bd70b17d8271099b2702f4401f5d2c6cf081
+Git Provenance,Active Branch,main
+Git Provenance,Working Tree Status,DIRTY (Uncommitted modifications present)
+Git Provenance,Commit Date,2026-10-31 09:48:31 -0300
+Git Provenance,Commit Message,Update Generic_module_Twophase.jl
+Git Provenance,Remote URL,https://github.com/Delg11/Generic_2PvsSLP.git
+Hardware Specs,CPU Model,AMD Ryzen 7 8700G w/ Radeon 780M Graphics
+Hardware Specs,Logical Threads / Cores,16
+Hardware Specs,Installed RAM (GB),31.15
+Hardware Specs,Host Machine,DESKTOP-F77C9MN
+Hardware Specs,Operating System,Windows (x86_64-w64-mingw32)
+Software Stack,Julia Version,1.12.5
+Software Stack,Julia Commit,5fe89b8ddc166260bfcd4a195b305aff0ccad686
+Software Stack,LP Solver (Gurobi),13.0.2
+Software Stack,BLAS Config,"LBTConfig([ILP64] libopenblas64_.dll, [LP64] libopenblas.dll)"
+Software Stack,BLAS Threads,8
+Algorithmic Tolerances,Optimality Tol (tolG),0.001
+Algorithmic Tolerances,Feasibility Tol (tolF),0.05
+Algorithmic Tolerances,Min Step Length (tolS),0.0001
+Algorithmic Tolerances,Initial TR Radius (delta0),0.1
+Algorithmic Tolerances,Max Iterations,5000
+Algorithmic Tolerances,Consecutive Small Steps (maxcount),3
+Algorithmic Tolerances,Restoration Target (theta0),0.9
+Algorithmic Tolerances,Restoration Step Ratio (r_resto),0.9
+Algorithmic Tolerances,Non-monotone Memory (M),1
+Execution Run,Benchmark Mode,test
+Execution Run,Distributed Workers,1
+Execution Run,Start Time,2026-10-31T19:00:59
+Execution Run,End Time,2026-10-31T19:02:14
+Execution Run,Total Wall Time (s),26.81
+Execution Run,CLI Command,src/Generic_main.jl -m test -p HS6 -w 2

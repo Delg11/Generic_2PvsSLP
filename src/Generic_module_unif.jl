@@ -4,7 +4,7 @@ export solve_unif_trust_region
 
 using NLPModels, Printf, JuMP, Gurobi, LinearAlgebra, RipQP,SparseArrays, QuadraticModels
 using ..SharedTypes
-include("Generic_module_ComputeB.jl")
+using ..Generic_module_ComputeB
 """
 Log message helper
 """
@@ -190,45 +190,67 @@ function compute_gradient_projection(
 
         function execute_dykstra!(out_buffer)
             p_dyk = copy(v)
+            p_old = similar(p_dyk)
             q = zeros(n)
             r = zeros(n)
             y_val = zeros(n)
             
             local fact_J
+            local y_plus_r, res, lambda_proj, jac_t_lambda
             if m > 0
                 J_Jt = jac_h * jac_h'
                 fact_J = lu(J_Jt + 1e-12 * I)
+                y_plus_r = zeros(n)
+                res = zeros(m)
+                lambda_proj = zeros(m)
+                jac_t_lambda = zeros(n)
             end
             
-            for k in 1:max_iter
-                p_old = copy(p_dyk)
+            @inbounds for k in 1:max_iter
+                copyto!(p_old, p_dyk)
                 
                 # Projeção 1: Limites da caixa (Box)
                 for i in 1:n
                     val = p_dyk[i] + q[i]
-                    y_val[i] = clamp(val, xl[i], xu[i])
-                    q[i] = val - y_val[i]
+                    y_val_i = clamp(val, xl[i], xu[i])
+                    y_val[i] = y_val_i
+                    q[i] = val - y_val_i
                 end
                 
                 # Projeção 2: Hiperplanos
                 if m > 0
-                    y_plus_r = y_val .+ r
-                    res = jac_h * y_plus_r .- b_target
-                    lambda_proj = fact_J \ res
+                    for i in 1:n
+                        y_plus_r[i] = y_val[i] + r[i]
+                    end
+                    mul!(res, jac_h, y_plus_r)
+                    for i in 1:m
+                        res[i] -= b_target[i]
+                    end
+                    ldiv!(lambda_proj, fact_J, res)
+                    mul!(jac_t_lambda, jac_h', lambda_proj)
                     
-                    p_dyk .= y_plus_r .- jac_h' * lambda_proj
-                    r .= y_plus_r .- p_dyk
+                    for i in 1:n
+                        p_dyk_i = y_plus_r[i] - jac_t_lambda[i]
+                        p_dyk[i] = p_dyk_i
+                        r[i] = y_plus_r[i] - p_dyk_i
+                    end
                 else
-                    p_dyk .= y_val
+                    copyto!(p_dyk, y_val)
                 end
                 
-                max_diff = norm(p_dyk .- p_old, Inf)
+                max_diff = 0.0
+                for i in 1:n
+                    diff_i = abs(p_dyk[i] - p_old[i])
+                    if diff_i > max_diff
+                        max_diff = diff_i
+                    end
+                end
                 if max_diff < tol
                     break
                 end
             end
             
-            for i in 1:n
+            @inbounds for i in 1:n
                 out_buffer[i] = p_dyk[i] - x[i]
             end
         end
@@ -289,18 +311,19 @@ end
 # ==============================================================================
 # MAIN UNIF SOLVER (Logic adapted from StrUNIF.jl)
 # ==============================================================================
-function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, params_unif::UNIFParams)
+function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64}, params_unif::UNIFParams; history::Bool=false)
     # --- Inicialização ---
     x = clamp.(copy(x0), prob.xl, prob.xu)
     # n, m = prob.n, prob.m
     n = length(x)
-    m = length(prob.h(x))
+    m = prob.ncon
     s_sol = zeros(n)
     F = prob.f(x)
     grad = prob.∇f(x)
     grad_old = copy(grad)
     h_val = prob.h(x)
     jac = prob.∇h(x)
+    jac_old = copy(jac)
     if params_unif.anisotropic_trust_region
         delta = fill(params_unif.delta0, n)
     else
@@ -314,11 +337,11 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
     is_feasible=false
     # --- HISTÓRICOS ---
     # 1. Apenas os passos aceitos (Trajetória "Limpa")
-    x_accepted = Vector{Vector{Float64}}()
-    push!(x_accepted, copy(x))
+    x_accepted = history ? Vector{Vector{Float64}}() : Vector{Float64}[]
+    history && push!(x_accepted, copy(x))
 
     # 2. Histórico Completo (Tentativas, Rejeições, Deltas)
-    full_log = Vector{StepLog_UNIF}()
+    full_log = history ? Vector{StepLog_UNIF}() : StepLog_UNIF[]
 
     theta = 1.0;
     theta1 = 1.0;
@@ -351,7 +374,7 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
     gpnorm = norm(proj_step, params_unif.norm_gpnorm)
 
     # Viabilidade
-    feas_violation = (m > 0) ? maximum(max.(0.0, h_val)) : 0.0
+    feas_violation = (m > 0) ? norm(h_val, Inf) : 0.0
     # Viabilidade Bounds
     bound_violation = maximum(max.(0.0, x .- prob.xu, prob.xl .- x))
 
@@ -370,6 +393,26 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
     s_last_accepted = zeros(n) # Isola o vetor de passo correto
     B = spdiagm(0 => ones(n))  # Declaração inicial no escopo superior
 
+    # Modelos JuMP reutilizáveis para os subproblemas
+    model = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), MOI.Silent() => (params_unif.output_flag == 0), "Method" => 1, "Presolve" => 0))
+    @variable(model, s[1:n])
+    if !params_unif.use_quadratic
+        @objective(model, Min, sum(0.0 * s[j] for j in 1:n))
+    end
+    lp_cons = m > 0 ? @constraint(model, [i = 1:m], 0.0 * sum(s[j] for j in 1:n) == 0.0) : nothing
+
+    model2 = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), MOI.Silent() => (params_unif.output_flag == 0), "Method" => 1, "Presolve" => 0))
+    @variable(model2, s2[1:n])
+    if m > 0
+        @variable(model2, z_plus[1:m] >= 0)
+        @variable(model2, z_minus[1:m] >= 0)
+        @objective(model2, Min, sum(z_plus) + sum(z_minus))
+        resto_cons = @constraint(model2, [i = 1:m], 0.0 * sum(s2[j] for j in 1:n) - z_plus[i] + z_minus[i] == 0.0)
+    else
+        @objective(model2, Min, 0.0)
+        resto_cons = nothing
+    end
+
     while ((countG < params_unif.maxcount || countF < params_unif.maxcount) && (countS < params_unif.maxcount) && (iter < params_unif.maxiter))
 
         params_unif.debugverbose && println("\n🔍 [DEBUG-UNIF] === Iteration $(iter+1) started ===")
@@ -377,7 +420,11 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
 
         if params_unif.use_quadratic
             if norm(s_last_accepted) > 1e-12 # Usa apenas o passo validado
-                y_diff = grad .- grad_old
+                if m > 0
+                    y_diff = (grad .- grad_old) .+ ((jac .- jac_old)' * lambda)
+                else
+                    y_diff = grad .- grad_old
+                end
                 B = Generic_module_ComputeB.compute_B(params_unif.B_update_strategy, n, s_last_accepted, y_diff, params_unif.σ, prob, x, lambda, B)
             else
                 B = params_unif.σ * spdiagm(0 => ones(n))
@@ -422,35 +469,37 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
             # -------------------------------------------------
             # Fluxo Original (JuMP + Gurobi)
             # -------------------------------------------------
-            model = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), "OutputFlag" => params_unif.output_flag))
-
-            @variable(model, s[i = 1:n])
-            
-            if params_unif.use_quadratic
-                @objective(model, Min, 0.5 * dot(s, Hqp * s) + dot(grad, s))
-            else
-                @objective(model, Min, dot(grad, s))
-            end
-
-            # Restrições Linearizadas: jac * s == -h(x)
-            lp_cons = nothing
-            if m > 0
-                lp_cons = @constraint(model, jac * s .== -h_val)
-            end
-
             for i in 1:n
                 set_lower_bound(s[i], sL[i])
                 set_upper_bound(s[i], sU[i])
             end
 
+            if params_unif.use_quadratic
+                @objective(model, Min, 0.5 * dot(s, Hqp * s) + dot(grad, s))
+            else
+                for j in 1:n
+                    set_objective_coefficient(model, s[j], grad[j])
+                end
+            end
+
+            # Restrições Linearizadas: jac * s == -h(x)
+            if m > 0
+                for i in 1:m
+                    for j in 1:n
+                        set_normalized_coefficient(lp_cons[i], s[j], jac[i, j])
+                    end
+                    set_normalized_rhs(lp_cons[i], -h_val[i])
+                end
+            end
+
             optimize!(model)
             
             if termination_status(model) == MOI.OPTIMAL
-                s_sol = value.(s)
+                s_sol = [value(s[i]) for i in 1:n]
                 lp_obj_val = objective_value(model)
                 if has_duals(model)
                     if m > 0
-                        lambda = dual.(lp_cons)
+                        lambda = [dual(lp_cons[i]) for i in 1:m]
                     end
                 else
                     if m > 0
@@ -468,10 +517,6 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
             params_unif.debugverbose && println("⚠️ [DEBUG-UNIF] Subproblem infeasible/failed. Entering RESTORATION phase.")
             
             current_phase = :restoration
-            model2 = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), "OutputFlag" => params_unif.output_flag))
-            
-            @variable(model2, s2[i = 1:n])
-
             sL2 = max.(prob.xl .- x, -0.8 .* delta)
             sU2 = min.(prob.xu .- x, 0.8 .* delta)
             for i in 1:n
@@ -480,20 +525,18 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
             end
 
             if m > 0
-                @variable(model2, z_plus[1:m] >= 0)
-                @variable(model2, z_minus[1:m] >= 0)
-                
-                @objective(model2, Min, sum(z_plus) + sum(z_minus))
-                
-                @constraint(model2, jac * s2 .== -h_val .+ z_plus .- z_minus)
-            else
-                @objective(model2, Min, 0.0)
+                for i in 1:m
+                    for j in 1:n
+                        set_normalized_coefficient(resto_cons[i], s2[j], jac[i, j])
+                    end
+                    set_normalized_rhs(resto_cons[i], -h_val[i])
+                end
             end
 
             optimize!(model2)
             
             if termination_status(model2) == MOI.OPTIMAL
-                s_sol = value.(s2)
+                s_sol = [value(s2[i]) for i in 1:n]
                 lp_obj_val = dot(grad, s_sol)
                 params_unif.debugverbose && println("🔍 [DEBUG-UNIF] Restoration solved. lp_obj_val = $lp_obj_val")
             else
@@ -574,19 +617,21 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
             params_unif.debugverbose && println("🔍 [DEBUG-UNIF] Check: ared ($ared) >= threshold ($threshold). Result: $step_accepted")
         end
 
-        # Gravando a tentativa antes de atualizar
-        delta_log = delta isa Vector ? copy(delta) : delta
-        log_entry = StepLog_UNIF(
-            iter + 1,       # Número da iteração atual
-            copy(x),        # De onde saiu
-            copy(x_trial),  # Para onde tentou ir
-            step_accepted ? :accepted : :rejected,
-            current_phase,
-            delta_log,
-            ared,
-            pred,
-        )
-        push!(full_log, log_entry)
+        # Gravando a tentativa antes de atualizar se history ativo
+        if history
+            delta_log = delta isa Vector ? copy(delta) : delta
+            log_entry = StepLog_UNIF(
+                iter + 1,       # Número da iteração atual
+                copy(x),        # De onde saiu
+                copy(x_trial),  # Para onde tentou ir
+                step_accepted ? :accepted : :rejected,
+                current_phase,
+                delta_log,
+                ared,
+                pred,
+            )
+            push!(full_log, log_entry)
+        end
         # ===================================
 
         accept_symbol = step_accepted ? "✓" : "✗"
@@ -605,7 +650,10 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
             grad_old = grad
             grad = prob.∇f(x)
             h_val = h_trial
+            jac_old = jac
             jac = prob.∇h(x)
+            vio_curr = vio_trial
+            feas_violation = (m > 0) ? norm(h_val, Inf) : 0.0
             thetaMax = 1.0
             # Atualiza o cache do passo para a equação secante da próxima iteração
             s_last_accepted = copy(s_sol)
@@ -644,8 +692,8 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
             # Limite inferior de segurança para o delta
             delta = max.(delta, 1e-4)
 
-            # Grava no histórico limpo
-            push!(x_accepted, copy(x))
+            # Grava no histórico limpo se history ativo
+            history && push!(x_accepted, copy(x))
             itrej = 0
 
         else
@@ -728,7 +776,7 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
             delta_disp = delta isa Vector ? maximum(delta) : delta
             @printf("%-4d %-12.5e %-10.3e %-8.2e %-8.2e %-8.3e %-8.3e %-10.3e %-6s %-12s\n", iter, F, vio_curr, delta_disp, snorm, ared, pred, theta, accept_symbol, counters_str)
         end
-        is_feasible = vio_curr <= 1e-3
+        is_feasible = (m > 0) ? (norm(h_val, Inf) <= 1e-3) : true
             end # Fim do While
 
 

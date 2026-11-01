@@ -1,15 +1,41 @@
 # ==============================================================================
-# RUNNER: STATISTICAL ANALYSIS
+# RUNNER: ANÁLISE ESTATÍSTICA E PERFIS DE DESEMPENHO
 # ==============================================================================
 
-# Carrega o arquivo contendo o módulo
-include("SQP_Stats.jl")
-# include("SBPO_Stats(slp).jl")
-using .Generic_module_Stats
+# 1. Escolha a análise desejada:
+#    :sbpo_artigo  -> Artigo Completo SBPO 2027 (critério KKT, 6 grupos G1 a G6)
+#    :sbpo_resumo  -> Resumo Expandido SBPO 2026 (n <= 10, m <= 1, 4 perfis)
+#    :tese_cap3    -> Tese Capítulo 3 (critério f-profile por valor de objetivo viável)
+#    :tese_cap4    -> Tese Capítulo 4 (extensão SQP / aproximações Hessianas)
+target_analysis = :sbpo_artigo
 
-# Caminho absoluto para a pasta de resultados
-results_dir = "C:\\Github\\Generic_2PvsSLP\\Caso SQP na Colecao CUTEST"
-# results_dir = "C:\\Github\\Generic_2PvsSLP\\Benchmark_Results_2026-08-31_22-24"
-# results_dir = "C:\\Github\\Generic_2PvsSLP\\data"
-# Executa a rotina principal
-Generic_module_Stats.run_statistical_analysis(results_dir)
+# 2. Caminho para a pasta contendo os dados (benchmark_slp.csv / benchmark_twophase.csv)
+results_dir = normpath(joinpath(@__DIR__, "..", "benchmarks", "Caso_SQP_CUTEST"))
+# Exemplos alternativos:
+# results_dir = normpath(joinpath(@__DIR__, "..", "data"))
+# results_dir = normpath(joinpath(@__DIR__, "..", "benchmarks", "Benchmark_Results_2026-XX-XX_XX-XX"))
+
+# 3. Disparo da análise selecionada
+if target_analysis == :sbpo_artigo
+    include("stats/stats_sbpo.jl")
+    using .StatsSBPO
+    StatsSBPO.run_statistical_analysis(results_dir; target=:artigo)
+
+elseif target_analysis == :sbpo_resumo
+    include("stats/stats_sbpo.jl")
+    using .StatsSBPO
+    StatsSBPO.run_statistical_analysis(results_dir; target=:resumo)
+
+elseif target_analysis == :tese_cap3
+    include("stats/stats_tese_cap3_fprofile.jl")
+    using .StatsCap3FProfile
+    StatsCap3FProfile.run_statistical_analysis(results_dir)
+
+elseif target_analysis == :tese_cap4
+    include("stats/stats_tese_cap4_sqp.jl")
+    using .StatsCap4SQP
+    StatsCap4SQP.run_statistical_analysis(results_dir)
+
+else
+    error("Opção desconhecida: $target_analysis. Escolha :sbpo_artigo, :sbpo_resumo, :tese_cap3 ou :tese_cap4.")
+end

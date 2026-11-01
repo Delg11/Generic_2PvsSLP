@@ -35,16 +35,31 @@ end
 """
 Main entry point for generating statistics, performance profiles, and XLSX reports.
 """
-function run_statistical_analysis(results_dir::String)
+function run_statistical_analysis(results_dir::String, df_meta::Union{DataFrame, Nothing}=nothing)
     println("\n" * "=" ^ 80)
     println("📊 STARTING CONSOLIDATED ANALYSIS AND STATISTICS")
     println("=" ^ 80)
 
-    # unif_file = joinpath(results_dir, "partial_backup_unif.csv")
-    # tp_file = joinpath(results_dir, "partial_backup_twophase.csv")
-    
-    unif_file = joinpath(results_dir, "benchmark_slp.csv")
-    tp_file = joinpath(results_dir, "benchmark_twophase.csv")
+    unif_candidates = ["Consolidated_UNIF.csv", "benchmark_slp.csv", "partial_backup_unif.csv"]
+    tp_candidates = ["Consolidated_Twophase.csv", "benchmark_twophase.csv", "partial_backup_twophase.csv"]
+
+    unif_file = ""
+    for c in unif_candidates
+        p = joinpath(results_dir, c)
+        if isfile(p)
+            unif_file = p
+            break
+        end
+    end
+
+    tp_file = ""
+    for c in tp_candidates
+        p = joinpath(results_dir, c)
+        if isfile(p)
+            tp_file = p
+            break
+        end
+    end
 
     println("Loading databases...")
     df_unif = isfile(unif_file) ? CSV.read(unif_file, DataFrame) : DataFrame()
@@ -171,24 +186,47 @@ function run_statistical_analysis(results_dir::String)
 
     # XLSX EXPORT
     output_file = joinpath(results_dir, "Consolidated_Statistics.xlsx")
+
+    # Se não passou df_meta, tenta ler do arquivo gerado
+    if df_meta === nothing
+        meta_csv = joinpath(results_dir, "environment_metadata.csv")
+        if isfile(meta_csv)
+            df_meta = try CSV.read(meta_csv, DataFrame) catch; nothing end
+        end
+    end
+
     XLSX.openxlsx(output_file, mode="w") do xf
-        XLSX.rename!(xf[1], "Scenario_A")
-        if nrow(stats_A) > 0 XLSX.writetable!(xf[1], collect(eachcol(stats_A)), names(stats_A)) end
+        sheet_idx = 1
+        if df_meta !== nothing && nrow(df_meta) > 0
+            XLSX.rename!(xf[sheet_idx], "Metadata_Environment")
+            XLSX.writetable!(xf[sheet_idx], collect(eachcol(df_meta)), names(df_meta))
+            sheet_idx += 1
+            XLSX.addsheet!(xf, "Scenario_A")
+        else
+            XLSX.rename!(xf[sheet_idx], "Scenario_A")
+        end
+
+        if nrow(stats_A) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(stats_A)), names(stats_A)) end
+        sheet_idx += 1
         
         XLSX.addsheet!(xf, "Scenario_B")
-        if nrow(stats_B) > 0 XLSX.writetable!(xf[2], collect(eachcol(stats_B)), names(stats_B)) end
+        if nrow(stats_B) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(stats_B)), names(stats_B)) end
+        sheet_idx += 1
         
         XLSX.addsheet!(xf, "Scenario_C")
-        if nrow(stats_C) > 0 XLSX.writetable!(xf[3], collect(eachcol(stats_C)), names(stats_C)) end
+        if nrow(stats_C) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(stats_C)), names(stats_C)) end
+        sheet_idx += 1
         
         XLSX.addsheet!(xf, "Intra_Comparison")
-        if nrow(df_res_intra) > 0 XLSX.writetable!(xf[4], collect(eachcol(df_res_intra)), names(df_res_intra)) end
+        if nrow(df_res_intra) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(df_res_intra)), names(df_res_intra)) end
+        sheet_idx += 1
         
         XLSX.addsheet!(xf, "Inter_Comparison")
-        if nrow(df_res_inter) > 0 XLSX.writetable!(xf[5], collect(eachcol(df_res_inter)), names(df_res_inter)) end
+        if nrow(df_res_inter) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(df_res_inter)), names(df_res_inter)) end
+        sheet_idx += 1
         
         XLSX.addsheet!(xf, "Inter_Details")
-        if nrow(df_inter_details) > 0 XLSX.writetable!(xf[6], collect(eachcol(df_inter_details)), names(df_inter_details)) end
+        if nrow(df_inter_details) > 0 XLSX.writetable!(xf[sheet_idx], collect(eachcol(df_inter_details)), names(df_inter_details)) end
     end
 
     println("✅ Execution and Analysis complete. Results, Plots, and XLSX saved to: $results_dir")

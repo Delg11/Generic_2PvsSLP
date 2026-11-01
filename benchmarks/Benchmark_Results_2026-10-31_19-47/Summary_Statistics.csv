@@ -1,0 +1,3 @@
+Variant,Total_Problems,Solved_KKT,Success_Rate,Mean_Time_ms,Mean_Iterations
+UNIF_SAR0_PH0_ATR0,1,1,100.0,35.8797,25.0
+2P_SAR0_PH0_ATR0_RRU1,1,1,100.0,673.2085,43.0
