@@ -345,6 +345,11 @@ function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::T, proble
         set_upper_bound(s[i], ub)
     end
 
+    # Safeguard against non-finite coefficients (NaN/Inf in gradient or Hessian)
+    if any(!isfinite, buffers.∇f) || any(!isfinite, grad_L) || (params.use_quadratic && (Hqp !== nothing && any(!isfinite, Hqp)))
+        return false, 0.0
+    end
+
     if params.use_quadratic
         @objective(model, Min, 0.5 * dot(s, Hqp * s) + dot(buffers.∇f, s))
     else

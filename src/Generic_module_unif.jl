@@ -200,41 +200,46 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
                 set_upper_bound(s[i], sU[i])
             end
 
-            if params_unif.use_quadratic
-                @objective(model, Min, 0.5 * dot(s, Hqp * s) + dot(grad, s))
+            # Safeguard against non-finite coefficients (NaN/Inf)
+            if any(!isfinite, grad) || (params_unif.use_quadratic && (Hqp !== nothing && any(!isfinite, Hqp)))
+                success_opt = false
             else
-                for j in 1:n
-                    set_objective_coefficient(model, s[j], grad[j])
-                end
-            end
-
-            # Restrições Linearizadas: jac * s == -h(x)
-            if m > 0
-                for i in 1:m
-                    for j in 1:n
-                        set_normalized_coefficient(lp_cons[i], s[j], jac[i, j])
-                    end
-                    set_normalized_rhs(lp_cons[i], -h_val[i])
-                end
-            end
-
-            optimize!(model)
-            
-            if termination_status(model) == MOI.OPTIMAL
-                s_sol = [value(s[i]) for i in 1:n]
-                lp_obj_val = objective_value(model)
-                if has_duals(model)
-                    if m > 0
-                        lambda = [dual(lp_cons[i]) for i in 1:m]
-                    end
+                if params_unif.use_quadratic
+                    @objective(model, Min, 0.5 * dot(s, Hqp * s) + dot(grad, s))
                 else
-                    if m > 0
-                        lambda = zeros(m)
+                    for j in 1:n
+                        set_objective_coefficient(model, s[j], grad[j])
                     end
                 end
-                success_opt = true
-                mode_str = params_unif.use_quadratic ? "SQP" : "UNIF"
-                params_unif.debugverbose && println("🔍 [DEBUG-$mode_str] Subproblem solved optimally (Gurobi). obj_val = $lp_obj_val")
+
+                # Restrições Linearizadas: jac * s == -h(x)
+                if m > 0
+                    for i in 1:m
+                        for j in 1:n
+                            set_normalized_coefficient(lp_cons[i], s[j], jac[i, j])
+                        end
+                        set_normalized_rhs(lp_cons[i], -h_val[i])
+                    end
+                end
+
+                optimize!(model)
+                
+                if termination_status(model) == MOI.OPTIMAL
+                    s_sol = [value(s[i]) for i in 1:n]
+                    lp_obj_val = objective_value(model)
+                    if has_duals(model)
+                        if m > 0
+                            lambda = [dual(lp_cons[i]) for i in 1:m]
+                        end
+                    else
+                        if m > 0
+                            lambda = zeros(m)
+                        end
+                    end
+                    success_opt = true
+                    mode_str = params_unif.use_quadratic ? "SQP" : "UNIF"
+                    params_unif.debugverbose && println("🔍 [DEBUG-$mode_str] Subproblem solved optimally (Gurobi). obj_val = $lp_obj_val")
+                end
             end
         end
 
