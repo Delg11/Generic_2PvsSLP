@@ -9,6 +9,7 @@
 using LinearAlgebra
 using Printf
 using Statistics
+using Dates
 using CUTEst
 using DataFrames
 using CSV
@@ -34,6 +35,7 @@ function get_status_name(status_code::Int)
     elseif status_code == 2 return "MAX_IT"
     elseif status_code == 3 return "INFEASIBLE_STATIONARY"
     elseif status_code == 4 return "STALLED_INFEASIBLE"
+    elseif status_code == 5 return "TIMEOUT"
     else return "UNKNOWN_$(status_code)" end
 end
 const get_status_string = get_status_name
@@ -155,14 +157,18 @@ function solve_main_problem_job(prob_name::String, tp_vars, un_vars, run_tp::Boo
         dim, ncon = nlp.meta.nvar, nlp.meta.ncon
 
         if run_tp
-            for var in tp_vars
+            for (v_idx, var) in enumerate(tp_vars)
                 try
                     exec_time = @elapsed begin
                         y, λ, θ, iter, status, hist, log = Generic_module_Twophase.two_phase_optimization(problem, x0, var.params; history=false)
                     end
                     fy = try problem.f(y) catch; NaN end
                     hy = try norm(problem.h(y)) catch; NaN end
-                    push!(tp_rows, (prob_name, dim, ncon, var.name, var.SAR, var.M, var.PH, var.ATR, var.RRU, get_status_name(status), iter, exec_time * 1000.0, isfinite(fy) ? fy : NaN, isfinite(hy) ? hy : NaN, var.is_base))
+                    st_name = get_status_name(status)
+                    push!(tp_rows, (prob_name, dim, ncon, var.name, var.SAR, var.M, var.PH, var.ATR, var.RRU, st_name, iter, exec_time * 1000.0, isfinite(fy) ? fy : NaN, isfinite(hy) ? hy : NaN, var.is_base))
+                    @printf("  [%s] [W%d] %-10s > [TP %2d/%2d] %-42s... %-8s (iter: %3d, %6.1fms)\n",
+                            Dates.format(now(), "HH:MM:SS"), myid(), prob_name, v_idx, length(tp_vars), var.name, st_name, iter, exec_time * 1000.0)
+                    flush(stdout)
                 catch e_var
                     println("⚠️ Worker $(myid()) exception in TwoPhase $prob_name ($(var.name)): $e_var")
                     push!(tp_rows, (prob_name, dim, ncon, var.name, var.SAR, var.M, var.PH, var.ATR, var.RRU, "ERROR", 0, 0.0, NaN, NaN, var.is_base))
@@ -171,14 +177,18 @@ function solve_main_problem_job(prob_name::String, tp_vars, un_vars, run_tp::Boo
         end
 
         if run_un
-            for var in un_vars
+            for (v_idx, var) in enumerate(un_vars)
                 try
                     exec_time = @elapsed begin
                         y, λ, θ, iter, status, hist, log = Generic_module_unif.solve_unif_trust_region(problem, x0, var.params)
                     end
                     fy = try problem.f(y) catch; NaN end
                     hy = try norm(problem.h(y)) catch; NaN end
-                    push!(unif_rows, (prob_name, dim, ncon, var.name, var.SAR, var.PH, var.ATR, get_status_name(status), iter, exec_time * 1000.0, isfinite(fy) ? fy : NaN, isfinite(hy) ? hy : NaN, var.is_base))
+                    st_name = get_status_name(status)
+                    push!(unif_rows, (prob_name, dim, ncon, var.name, var.SAR, var.PH, var.ATR, st_name, iter, exec_time * 1000.0, isfinite(fy) ? fy : NaN, isfinite(hy) ? hy : NaN, var.is_base))
+                    @printf("  [%s] [W%d] %-10s > [UNIF %2d/%2d] %-40s... %-8s (iter: %3d, %6.1fms)\n",
+                            Dates.format(now(), "HH:MM:SS"), myid(), prob_name, v_idx, length(un_vars), var.name, st_name, iter, exec_time * 1000.0)
+                    flush(stdout)
                 catch e_var
                     println("⚠️ Worker $(myid()) exception in UNIF $prob_name ($(var.name)): $e_var")
                     push!(unif_rows, (prob_name, dim, ncon, var.name, var.SAR, var.PH, var.ATR, "ERROR", 0, 0.0, NaN, NaN, var.is_base))

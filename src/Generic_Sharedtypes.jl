@@ -149,6 +149,7 @@ Base.@kwdef mutable struct TwoPhaseParams
     max_iter_resto::Int = 50        # Maximum iterations within a single restoration phase
     max_iter_opt::Int = 50          # Maximum iterations within a single optimization phase
     max_outer_iter::Int = 500       # Maximum overall algorithm iterations
+    max_time::Float64 = 60.0        # Maximum wall-clock time in seconds per variant (<=0 for unlimited)
     stag_tol::Float64 = 1e-5        # Step size threshold to trigger stagnation counter
     max_stag::Int = 3               # Maximum consecutive stagnated iterations allowed
     non_monotone_M::Int = 5         # History length for non-monotone acceptance criteria
@@ -205,6 +206,7 @@ Configuration parameters specifically for the standard UNIF (Unified Iterative F
 """
 Base.@kwdef mutable struct UNIFParams
     maxiter::Int = 500              # Maximum total iterations
+    max_time::Float64 = 60.0        # Maximum wall-clock time in seconds per variant (<=0 for unlimited)
     tolG::Float64 = 1e-3            # Tolerance for projected gradient
     tolF::Float64 = 5e-2            # Tolerance for objective function decrease
     tolS::Float64 = 1e-3            # Tolerance for step size magnitude

@@ -141,7 +141,8 @@ function restoration_phase(
     buffers::OptimizedBuffers, 
     full_log::Vector{StepLog_TwoPhase}=Vector{StepLog_TwoPhase}(), 
     iterglobal::Int,
-    history::Bool=true
+    history::Bool=true,
+    t_start_alg::Float64=0.0
 ) where {T<:Union{Float64, Vector{Float64}}}
     # =========================================================
     # Step 1: Target parameters calculation based on original point
@@ -171,6 +172,10 @@ function restoration_phase(
     buffers.z_old .= z
     # Outer Loop (Iterations ℓ)
     while ℓ < params.max_iter_resto
+        if params.max_time > 0 && t_start_alg > 0 && (time() - t_start_alg) > params.max_time
+            params.debugverbose && println("⏱️ [DEBUG-RESTO] Timeout reached in restoration loop.")
+            return buffers.z_temp, δ, false, h_z
+        end
         
         # || P_Ω(z - ∇c(z)) - z ||
         A_z = problem.∇h(buffers.z_temp)
@@ -407,7 +412,8 @@ function optimization_phase(
     F_y::Float64=NaN,
     h_y::Union{Vector{Float64}, Nothing}=nothing,
     F_xk::Float64=NaN,
-    h_xk::Union{Vector{Float64}, Nothing}=nothing
+    h_xk::Union{Vector{Float64}, Nothing}=nothing,
+    t_start_alg::Float64=0.0
 )
 
     # =========================================================
@@ -452,6 +458,10 @@ function optimization_phase(
     local grad_ret = copy(buffers.∇f)
     # Main optimization iteration loop
     while j < params.max_iter_opt
+        if params.max_time > 0 && t_start_alg > 0 && (time() - t_start_alg) > params.max_time
+            params.debugverbose && println("⏱️ [DEBUG-OPT] Timeout reached in optimization subproblem loop.")
+            return y, buffers.λ, θ_k, δ, false, F_y_val, h_y_val, buffers.∇f
+        end
         params.debugverbose && println("\n🔍 [DEBUG-OPT] === Iteration j=$j started ===")
         # =========================================================
         # Step 2: Find z^{ℓ,j} by solving the subproblem
@@ -764,6 +774,7 @@ function two_phase_optimization(
         δr = params.anisotropic_trust_region ? fill(params.δ0_resto, n) : params.δ0_resto
         δo = params.anisotropic_trust_region ? fill(params.δ0_opt, n) : params.δ0_opt
         iter = 0
+        t_start_alg = time()
         s_opt_outer = zeros(n)
         y_opt_outer = zeros(n)
         B   = params.use_quadratic ? spdiagm(0 => ones(n)) : nothing
@@ -856,6 +867,12 @@ function two_phase_optimization(
         end
         # Main loop (Algorithm 4.3)
         while iter < max_outer_iter
+            if params.max_time > 0 && (time() - t_start_alg) > params.max_time
+                if verbose || logio !== nothing
+                    log_message!("⏱️ TIMEOUT: Execution exceeded $(params.max_time)s limit", logio; verbose=verbose)
+                end
+                return x, λ, θ, iter, 5, history ? x_hist[1:(iter + 1)] : nothing, full_log
+            end
             if any(!isfinite, x)
                 if verbose || logio !== nothing
                     log_message!("❌ BREAKDOWN: Non-finite value (NaN/Inf) detected in x vector", logio; verbose=verbose)
@@ -907,7 +924,13 @@ function two_phase_optimization(
             # Step 1: RESTORATION PHASE
             # ================================================================
             if norm_h_current > tolerance
-                y, δr, success_resto, h_resto = restoration_phase(problem, x, δr, model_restaura; params=params, buffers=buffers, full_log=full_log, iterglobal=iter, history=history)
+                y, δr, success_resto, h_resto = restoration_phase(problem, x, δr, model_restaura; params=params, buffers=buffers, full_log=full_log, iterglobal=iter, history=history, t_start_alg=t_start_alg)
+                if params.max_time > 0 && (time() - t_start_alg) > params.max_time
+                    if verbose || logio !== nothing
+                        log_message!("⏱️ TIMEOUT: Execution exceeded $(params.max_time)s limit", logio; verbose=verbose)
+                    end
+                    return y, λ, θ, iter, 5, history ? x_hist[1:(iter + 1)] : nothing, full_log
+                end
                 norm_h_y = norm(h_resto)
                 if norm_h_y > params.r_resto * norm_h_old
                     if verbose || logio !== nothing
@@ -951,8 +974,15 @@ function two_phase_optimization(
                 F_y = F_y_pass,
                 h_y = h_y_pass,
                 F_xk = f_current,
-                h_xk = h_current
+                h_xk = h_current,
+                t_start_alg = t_start_alg
             )
+            if params.max_time > 0 && (time() - t_start_alg) > params.max_time
+                if verbose || logio !== nothing
+                    log_message!("⏱️ TIMEOUT: Execution exceeded $(params.max_time)s limit", logio; verbose=verbose)
+                end
+                return x_new, λ_new, θ_new, iter, 5, history ? x_hist[1:(iter + 1)] : nothing, full_log
+            end
             # ================================================================
             # Step 3: UPDATE AND LOG
             # ================================================================

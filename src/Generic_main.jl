@@ -43,6 +43,10 @@ function parse_commandline()
             help = "Maximum outer iterations per variant (default: 2000)."
             arg_type = Int
             default = 2000
+        "--timeout", "-t"
+            help = "Maximum wall-clock time in seconds per variant (default: 60.0s, <=0 for unlimited)."
+            arg_type = Float64
+            default = 60.0
         "--run-unif"
             help = "Run UNIF variants (true/false)."
             arg_type = Bool
@@ -152,6 +156,7 @@ const RUN_TWOPHASE = args["run-twophase"]
 const RUN_UNIF     = args["run-unif"]
 
 common_max_iter = args["max-iter"]
+common_timeout  = args["timeout"]
 common_delta0   = 0.1
 common_tolG     = 1e-3
 common_tolF     = 5e-2
@@ -170,7 +175,7 @@ const QP_SOLVER_CHOICE = Symbol(args["qp-solver"])
 
 function build_twophase_params(sar, M, ph, atr, rru, use_quad, b_strat; atr_strat::Symbol=:legacy_parabolic, qp_solver::Symbol=QP_SOLVER_CHOICE)
     return SharedTypes.TwoPhaseParams(
-        max_outer_iter = common_max_iter, δ0_opt = common_delta0, δ0_resto = common_delta0,
+        max_outer_iter = common_max_iter, max_time = common_timeout, δ0_opt = common_delta0, δ0_resto = common_delta0,
         tolG = common_tolG, tolF = common_tolF, tolS = common_tolS, maxcount = common_maxcount,
         verbose_out = common_verbose, use_unif_stopping = true, rfeas = 1e-12, δmin = 1e-12, 
         δmax = 1e16, r_resto = 0.9, τ1 = 0.1, τ2 = 0.25, αL = 1e-8, αR = 1e-8,
@@ -184,7 +189,7 @@ end
 function build_unif_params(sar, ph, atr, use_quad, b_strat; atr_strat::Symbol=:legacy_parabolic, qp_solver::Symbol=QP_SOLVER_CHOICE)
     return SharedTypes.UNIFParams(
         delta0 = common_delta0, tolG = common_tolG, tolF = common_tolF, tolS = common_tolS,
-        maxiter = common_max_iter, maxcount = common_maxcount, verbose = common_verbose,
+        maxiter = common_max_iter, max_time = common_timeout, maxcount = common_maxcount, verbose = common_verbose,
         verbose_out = common_verbose, debugverbose = false, parabolic_heuristic = ph, anisotropic_trust_region = atr,
         atr_strategy = atr_strat,
         strong_agreement_rule = sar, use_quadratic = use_quad, B_update_strategy = b_strat, quadratic_solver = qp_solver
@@ -429,12 +434,13 @@ function main()
                             push!(df_unif, (r[1], git_commit_short, r[2:end]...))
                         end
 
+                        t_str = Dates.format(now(), "HH:MM:SS")
                         if success_job
-                            @printf("  [%3d/%3d] ✅ Concluído: %-12s em %6.1fs | TwoPhase: %2d, UNIF: %2d\n", 
-                                    completed_count, total_probs, p, t_p_elapsed, length(tp_rows), length(unif_rows))
+                            @printf("  [%s] [%3d/%3d] ✅ Concluído: %-12s em %6.1fs | TwoPhase: %2d, UNIF: %2d\n", 
+                                    t_str, completed_count, total_probs, p, t_p_elapsed, length(tp_rows), length(unif_rows))
                         else
-                            @printf("  [%3d/%3d] ⚠️ Ignorado (Falha): %-12s em %6.1fs\n", 
-                                    completed_count, total_probs, p, t_p_elapsed)
+                            @printf("  [%s] [%3d/%3d] ⚠️ Ignorado (Falha): %-12s em %6.1fs\n", 
+                                    t_str, completed_count, total_probs, p, t_p_elapsed)
                         end
 
                         # Incremental backups saved on disk immediately after each problem finishes!
@@ -460,27 +466,35 @@ function main()
                     x0 = clamp.(nlp.meta.x0, problem.xl, problem.xu)
                     dim, ncon = nlp.meta.nvar, nlp.meta.ncon
 
-                    println("\n🚀 PROCESSING: $prob_name [Var: $dim | Con: $ncon]")
+                    println("\n[$(Dates.format(now(), "HH:MM:SS"))] 🚀 PROCESSING: $prob_name [Var: $dim | Con: $ncon]")
 
                     if RUN_TWOPHASE
-                        for var in twophase_variants
-                            print("  [Two-Phase] > $(var.name)... ")
+                        for (v_idx, var) in enumerate(twophase_variants)
+                            t_str = Dates.format(now(), "HH:MM:SS")
+                            @printf("  [%s] [Two-Phase] [%2d/%2d] > %-45s... ", t_str, v_idx, length(twophase_variants), var.name)
+                            flush(stdout)
                             exec_time = @elapsed begin
                                 y, λ, θ, iter, status, hist, log = Generic_module_Twophase.two_phase_optimization(problem, x0, var.params; history=false)
                             end
-                            push!(df_twophase, (prob_name, git_commit_short, dim, ncon, var.name, var.SAR, var.M, var.PH, var.ATR, var.RRU, get_status_string(status), iter, exec_time * 1000.0, problem.f(y), norm(problem.h(y)), var.is_base))
-                            println("Done. ($(round(exec_time * 1000, digits=1))ms)")
+                            st_name = get_status_string(status)
+                            push!(df_twophase, (prob_name, git_commit_short, dim, ncon, var.name, var.SAR, var.M, var.PH, var.ATR, var.RRU, st_name, iter, exec_time * 1000.0, problem.f(y), norm(problem.h(y)), var.is_base))
+                            @printf("%-8s (iter: %3d, %6.1fms)\n", st_name, iter, exec_time * 1000.0)
+                            flush(stdout)
                         end
                     end
 
                     if RUN_UNIF
-                        for var in unif_variants
-                            print("  [UNIF] > $(var.name)... ")
+                        for (v_idx, var) in enumerate(unif_variants)
+                            t_str = Dates.format(now(), "HH:MM:SS")
+                            @printf("  [%s] [UNIF]      [%2d/%2d] > %-45s... ", t_str, v_idx, length(unif_variants), var.name)
+                            flush(stdout)
                             exec_time = @elapsed begin
                                 y, λ, θ, iter, status, hist, log = Generic_module_unif.solve_unif_trust_region(problem, x0, var.params)
                             end
-                            push!(df_unif, (prob_name, git_commit_short, dim, ncon, var.name, var.SAR, var.PH, var.ATR, get_status_string(status), iter, exec_time * 1000.0, problem.f(y), norm(problem.h(y)), var.is_base))
-                            println("Done. ($(round(exec_time * 1000, digits=1))ms)")
+                            st_name = get_status_string(status)
+                            push!(df_unif, (prob_name, git_commit_short, dim, ncon, var.name, var.SAR, var.PH, var.ATR, st_name, iter, exec_time * 1000.0, problem.f(y), norm(problem.h(y)), var.is_base))
+                            @printf("%-8s (iter: %3d, %6.1fms)\n", st_name, iter, exec_time * 1000.0)
+                            flush(stdout)
                         end
                     end
                 catch e

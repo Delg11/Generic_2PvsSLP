@@ -99,7 +99,7 @@ function run_statistical_analysis(results_dir::String, df_meta::Union{DataFrame,
 
     # SCENARIO TABLES
     df_Scenario_A = df_valid
-    df_Scenario_B = filter(r -> !ismissing(r.Iterations) && r.Iterations > 0 && r.Status != "MAX_IT", df_valid)
+    df_Scenario_B = filter(r -> !ismissing(r.Iterations) && r.Iterations > 0 && r.Status != "MAX_IT" && r.Status != "TIMEOUT", df_valid)
     df_Scenario_C = filter(r -> !ismissing(r.Status) && r.Status == "KKT_OK", df_valid)
 
     function calculate_statistics(df_scenario)
@@ -796,7 +796,7 @@ Quando `paper_mode=true`:
 """
 function plot_profile(
     df::DataFrame,
-    solvers::Vector{String},
+    solvers_in::AbstractVector,
     metric_col::Symbol,
     title_str::String,
     filename::String,
@@ -806,6 +806,7 @@ function plot_profile(
     h_tol::Float64=1e-5,
     paper_mode::Bool=false
 )
+    solvers = String.(filter(!ismissing, solvers_in))
     if length(solvers) < 2
         println("  > Skipping '$title_str': Not enough valid solvers in this group.")
         return
@@ -816,7 +817,7 @@ function plot_profile(
     n_solvers = length(solvers)
 
     perf_matrix = fill(Inf, n_probs, n_solvers)
-    infeasible_statuses = ["INFEASIBLE_STATIONARY", "STALLED_INFEASIBLE", "FAIL", "ERROR"]
+    infeasible_statuses = ["INFEASIBLE_STATIONARY", "STALLED_INFEASIBLE", "FAIL", "ERROR", "TIMEOUT"]
 
     has_h = :h_norm in propertynames(df)
 

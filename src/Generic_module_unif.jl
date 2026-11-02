@@ -123,7 +123,12 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
         resto_cons = nothing
     end
 
+    t_start_alg = time()
     while ((countG < params_unif.maxcount || countF < params_unif.maxcount) && (countS < params_unif.maxcount) && (iter < params_unif.maxiter))
+        if params_unif.max_time > 0 && (time() - t_start_alg) > params_unif.max_time
+            params_unif.verbose && println("⏱️ TIMEOUT: Execution exceeded $(params_unif.max_time)s limit")
+            return x, lambda, theta, iter, 5, history ? x_hist[1:(iter+1)] : nothing, full_log
+        end
         if any(!isfinite, x)
             params_unif.debugverbose && println("❌ [DEBUG-UNIF] Breakdown: NaN/Inf detected in x vector.")
             return x, lambda, theta, iter, 4, history ? x_hist[1:(iter+1)] : nothing, full_log
