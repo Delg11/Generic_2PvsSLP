@@ -400,7 +400,24 @@ function main()
 
                 asyncmap(problems; ntasks=nworkers()) do p
                     t_p_start = time()
-                    (tp_rows, unif_rows) = remotecall_fetch(solve_main_problem_job, pool, p, twophase_variants, unif_variants, RUN_TWOPHASE, RUN_UNIF, false)
+                    local tp_rows = []
+                    local unif_rows = []
+                    local success_job = false
+
+                    try
+                        (tp_rows, unif_rows) = remotecall_fetch(solve_main_problem_job, pool, p, twophase_variants, unif_variants, RUN_TWOPHASE, RUN_UNIF, false)
+                        success_job = true
+                    catch e_call
+                        @printf("  ❌ ERRO / WORKER EXCEPTION em %-12s: %s\n", p, sprint(showerror, e_call))
+                        if e_call isa ProcessExitedException
+                            try
+                                new_w = addprocs(1)
+                                @async remotecall_fetch(run_worker_warmup, new_w[1])
+                                println("  🔄 Worker reposicionado no pool: PID $(new_w[1])")
+                            catch
+                            end
+                        end
+                    end
                     t_p_elapsed = time() - t_p_start
                     
                     lock(progress_lock) do
@@ -412,8 +429,13 @@ function main()
                             push!(df_unif, (r[1], git_commit_short, r[2:end]...))
                         end
 
-                        @printf("  [%3d/%3d] ✅ Concluído: %-12s em %6.1fs | TwoPhase: %2d, UNIF: %2d\n", 
-                                completed_count, total_probs, p, t_p_elapsed, length(tp_rows), length(unif_rows))
+                        if success_job
+                            @printf("  [%3d/%3d] ✅ Concluído: %-12s em %6.1fs | TwoPhase: %2d, UNIF: %2d\n", 
+                                    completed_count, total_probs, p, t_p_elapsed, length(tp_rows), length(unif_rows))
+                        else
+                            @printf("  [%3d/%3d] ⚠️ Ignorado (Falha): %-12s em %6.1fs\n", 
+                                    completed_count, total_probs, p, t_p_elapsed)
+                        end
 
                         # Incremental backups saved on disk immediately after each problem finishes!
                         RUN_TWOPHASE && CSV.write(joinpath(results_dir, "partial_backup_twophase.csv"), df_twophase)
