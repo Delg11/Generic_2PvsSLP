@@ -1,0 +1,33 @@
+Category,Parameter,Value
+Git Provenance,Commit SHA (Short),bbb0e2a
+Git Provenance,Commit SHA (Full),bbb0e2accadf97063f944bd3e3cd23d29d86f42e
+Git Provenance,Active Branch,main
+Git Provenance,Working Tree Status,DIRTY (Uncommitted modifications present)
+Git Provenance,Commit Date,2026-11-02 20:11:50 -0300
+Git Provenance,Commit Message,02112026
+Git Provenance,Remote URL,https://github.com/Delg11/Generic_2PvsSLP.git
+Hardware Specs,CPU Model,tigerlake
+Hardware Specs,Logical Threads / Cores,8
+Hardware Specs,Installed RAM (GB),14.86
+Hardware Specs,Host Machine,gabriel-Inspiron-15-5510
+Hardware Specs,Operating System,Linux (x86_64-linux-gnu)
+Software Stack,Julia Version,1.12.5
+Software Stack,Julia Commit,5fe89b8ddc166260bfcd4a195b305aff0ccad686
+Software Stack,LP Solver (Gurobi),13.0.2
+Software Stack,BLAS Config,"LBTConfig([ILP64] libopenblas64_.so, [LP64] libopenblas.so)"
+Software Stack,BLAS Threads,1
+Algorithmic Tolerances,Optimality Tol (tolG),0.001
+Algorithmic Tolerances,Feasibility Tol (tolF),0.05
+Algorithmic Tolerances,Min Step Length (tolS),0.0001
+Algorithmic Tolerances,Initial TR Radius (delta0),0.1
+Algorithmic Tolerances,Max Iterations,5000
+Algorithmic Tolerances,Consecutive Small Steps (maxcount),3
+Algorithmic Tolerances,Restoration Target (theta0),0.9
+Algorithmic Tolerances,Restoration Step Ratio (r_resto),0.9
+Algorithmic Tolerances,Non-monotone Memory (M),1
+Execution Run,Benchmark Mode,test
+Execution Run,Distributed Workers,2
+Execution Run,Start Time,2026-11-03T18:09:30
+Execution Run,End Time,2026-11-03T18:13:08
+Execution Run,Total Wall Time (s),112.4
+Execution Run,CLI Command,"src/Generic_main.jl -m test -p ALLINITC,BT8,BT12,CERI651DLS,BA-L1LS,ARGLINB -w 2 --tp-sqp all --unif-sqp all --tp-atr-strat all --unif-atr-strat all -i 500 -t 60.0"

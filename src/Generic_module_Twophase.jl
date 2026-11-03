@@ -31,14 +31,21 @@ end
 # ==============================================================================
 
 # Creates the JuMP model structure for either the restoration or optimization phase
-function create_optimized_model(solver_choice::Symbol, phase::Symbol, n::Int, m::Int; env::Union{Gurobi.Env, Nothing}=nothing)
-# Create base model
+function create_optimized_model(solver_choice::Symbol, phase::Symbol, n::Int, m::Int; env::Union{Gurobi.Env, Nothing}=nothing, use_quadratic::Bool=false, sub_time_limit::Float64=5.0)
     model = if solver_choice == :gurobi
-        # Usa a constante global em vez de criar um novo env
-        Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), MOI.Silent() => true, "Method" => 1, "Presolve" => 0))
-
+        qp_method = (phase == :otimizacao && use_quadratic) ? -1 : 1
+        qp_presolve = (phase == :otimizacao && use_quadratic) ? -1 : 0
+        Model(optimizer_with_attributes(
+            () -> Gurobi.Optimizer(GRB_ENV),
+            MOI.Silent() => true,
+            "Threads" => 1,
+            "Method" => qp_method,
+            "Presolve" => qp_presolve,
+            "NonConvex" => 0,
+            "TimeLimit" => sub_time_limit
+        ))
     elseif solver_choice == :highs
-        Model(optimizer_with_attributes(HiGHS.Optimizer, "output_flag" => false, "threads" => Threads.nthreads(), "primal_feasibility_tolerance" => 1e-8, "dual_feasibility_tolerance" => 1e-8))
+        Model(optimizer_with_attributes(HiGHS.Optimizer, "output_flag" => false, "threads" => 1, "primal_feasibility_tolerance" => 1e-8, "dual_feasibility_tolerance" => 1e-8))
     else
         error("Unsupported solver: $solver_choice")
     end
@@ -205,6 +212,10 @@ function restoration_phase(
         success_step = false
         # Inner Loop (Iterations j - Trust region search)
         while j < params.max_iter_resto
+            if params.max_time > 0 && t_start_alg > 0 && (time() - t_start_alg) > params.max_time
+                params.debugverbose && println("⏱️ [DEBUG-RESTO] Timeout reached in inner restoration loop.")
+                return buffers.z_temp, δ, false, h_z
+            end
             
             # =========================================================
             # Step 5: Subproblem resolution to compute z^{ℓ,j}
@@ -839,10 +850,9 @@ function two_phase_optimization(
             end
         end
         # Create models
-
-
-        model_restaura = create_optimized_model(solver_choice, :restauracao, n, m; env=GRB_ENV)
-        model_opt = create_optimized_model(solver_choice, :otimizacao, n, m; env=GRB_ENV)
+        sub_tl = params.max_time > 0 ? min(5.0, params.max_time) : 5.0
+        model_restaura = create_optimized_model(solver_choice, :restauracao, n, m; env=GRB_ENV, use_quadratic=false, sub_time_limit=sub_tl)
+        model_opt = create_optimized_model(solver_choice, :otimizacao, n, m; env=GRB_ENV, use_quadratic=params.use_quadratic, sub_time_limit=sub_tl)
         # Table header
         if verbose || logio !== nothing
             log_message!(repeat("=", 120), logio; verbose=verbose)

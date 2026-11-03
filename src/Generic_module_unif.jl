@@ -103,15 +103,34 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
     d_curv = ones(n)
     jac_diff_l1 = zeros(n)
 
+    sub_time_limit = params_unif.max_time > 0 ? min(5.0, params_unif.max_time) : 5.0
+    qp_method = params_unif.use_quadratic ? -1 : 1
+    qp_presolve = params_unif.use_quadratic ? -1 : 0
+
     # Modelos JuMP reutilizáveis para os subproblemas
-    model = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), MOI.Silent() => (params_unif.output_flag == 0), "Method" => 1, "Presolve" => 0))
+    model = Model(optimizer_with_attributes(
+        () -> Gurobi.Optimizer(GRB_ENV),
+        MOI.Silent() => (params_unif.output_flag == 0),
+        "Threads" => 1,
+        "Method" => qp_method,
+        "Presolve" => qp_presolve,
+        "NonConvex" => 0,
+        "TimeLimit" => sub_time_limit
+    ))
     @variable(model, s[1:n])
     if !params_unif.use_quadratic
         @objective(model, Min, sum(0.0 * s[j] for j in 1:n))
     end
     lp_cons = m > 0 ? @constraint(model, [i = 1:m], 0.0 * sum(s[j] for j in 1:n) == 0.0) : nothing
 
-    model2 = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), MOI.Silent() => (params_unif.output_flag == 0), "Method" => 1, "Presolve" => 0))
+    model2 = Model(optimizer_with_attributes(
+        () -> Gurobi.Optimizer(GRB_ENV),
+        MOI.Silent() => (params_unif.output_flag == 0),
+        "Threads" => 1,
+        "Method" => 1,
+        "Presolve" => 0,
+        "TimeLimit" => sub_time_limit
+    ))
     @variable(model2, s2[1:n])
     if m > 0
         @variable(model2, z_plus[1:m] >= 0)
@@ -127,11 +146,11 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
     while ((countG < params_unif.maxcount || countF < params_unif.maxcount) && (countS < params_unif.maxcount) && (iter < params_unif.maxiter))
         if params_unif.max_time > 0 && (time() - t_start_alg) > params_unif.max_time
             params_unif.verbose && println("⏱️ TIMEOUT: Execution exceeded $(params_unif.max_time)s limit")
-            return x, lambda, theta, iter, 5, history ? x_hist[1:(iter+1)] : nothing, full_log
+            return x, lambda, theta, iter, 5, x_accepted, full_log
         end
         if any(!isfinite, x)
             params_unif.debugverbose && println("❌ [DEBUG-UNIF] Breakdown: NaN/Inf detected in x vector.")
-            return x, lambda, theta, iter, 4, history ? x_hist[1:(iter+1)] : nothing, full_log
+            return x, lambda, theta, iter, 4, x_accepted, full_log
         end
 
         params_unif.debugverbose && println("\n🔍 [DEBUG-UNIF] === Iteration $(iter+1) started ===")
@@ -227,6 +246,11 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
                     end
                 end
 
+                if params_unif.max_time > 0
+                    rem_t = params_unif.max_time - (time() - t_start_alg)
+                    rem_t <= 0.0 && return x, lambda, theta, iter, 5, x_accepted, full_log
+                    set_optimizer_attribute(model, "TimeLimit", clamp(rem_t, 0.5, 5.0))
+                end
                 optimize!(model)
                 
                 if termination_status(model) == MOI.OPTIMAL
@@ -279,6 +303,11 @@ function solve_unif_trust_region(prob::OptimizationProblem, x0::Vector{Float64},
                 end
             end
 
+            if params_unif.max_time > 0
+                rem_t = params_unif.max_time - (time() - t_start_alg)
+                rem_t <= 0.0 && return x, lambda, theta, iter, 5, x_accepted, full_log
+                set_optimizer_attribute(model2, "TimeLimit", clamp(rem_t, 0.5, 5.0))
+            end
             optimize!(model2)
             
             if termination_status(model2) == MOI.OPTIMAL

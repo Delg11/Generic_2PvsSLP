@@ -417,9 +417,13 @@ function main()
                         if e_call isa ProcessExitedException
                             try
                                 new_w = addprocs(1)
-                                @async remotecall_fetch(run_worker_warmup, new_w[1])
-                                println("  🔄 Worker reposicionado no pool: PID $(new_w[1])")
-                            catch
+                                worker_file = normpath(joinpath(@__DIR__, "worker_env.jl"))
+                                remotecall_fetch(include, new_w[1], worker_file)
+                                remotecall_fetch(run_worker_warmup, new_w[1])
+                                push!(pool, new_w[1])
+                                println("  🔄 Worker reposicionado e aquecido no pool: PID $(new_w[1])")
+                            catch e_rep
+                                println("  ⚠️ Falha ao reposicionar worker: $e_rep")
                             end
                         end
                     end

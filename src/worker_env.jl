@@ -7,6 +7,7 @@
 # ==============================================================================
 
 using LinearAlgebra
+BLAS.set_num_threads(1)
 using Printf
 using Statistics
 using Dates
@@ -136,6 +137,7 @@ function solve_fast_benchmark_problem(prob_name::String, max_iter::Int; decode::
         println("❌ Erro ao processar $prob_name: $err")
     finally
         isnothing(nlp) || finalize(nlp)
+        GC.gc()
     end
 
     return results
@@ -199,6 +201,7 @@ function solve_main_problem_job(prob_name::String, tp_vars, un_vars, run_tp::Boo
         println("❌ ERROR on worker $(myid()) in $prob_name: $e")
     finally
         isnothing(nlp) || finalize(nlp)
+        GC.gc()
     end
     return (tp_rows, unif_rows)
 end
@@ -234,6 +237,7 @@ function solve_main_variant_job(prob_name::String, kind::Symbol, var, decode_fla
         return (kind, nothing)
     finally
         isnothing(nlp) || finalize(nlp)
+        GC.gc()
     end
 end
 

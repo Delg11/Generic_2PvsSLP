@@ -923,8 +923,7 @@ function compute_gradient_projection(
 
         # 2. Método: QP via JuMP
         if run_qp
-            model = Model(Gurobi.Optimizer)
-            set_silent(model)
+            model = Model(optimizer_with_attributes(() -> Gurobi.Optimizer(GRB_ENV), MOI.Silent() => true, "Threads" => 1, "TimeLimit" => 5.0, "NonConvex" => 0))
             @variable(model, xl[i] <= p_var[i=1:n] <= xu[i])
             @objective(model, Min, 0.5 * sum((p_var[i] - v[i])^2 for i in 1:n))
             

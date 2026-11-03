@@ -7,6 +7,112 @@ using LinearAlgebra
 using ..SharedTypes
 
 """
+    _regularize_symmetric_matrix(B_in::AbstractMatrix{Float64}, n::Int, σ_fallback::Float64)
+
+Garante que a matriz Hessiana simétrica seja finita, bem condicionada (norma <= 1e8)
+e estritamente definida positiva (PSD) com margem relativa segura para o Gurobi/RipQP.
+"""
+function _regularize_symmetric_matrix(B_in::AbstractMatrix{Float64}, n::Int, σ_fallback::Float64)
+    σ_safe = (isfinite(σ_fallback) && σ_fallback > 0.0) ? σ_fallback : 0.1
+    if any(!isfinite, B_in)
+        return issparse(B_in) ? (σ_safe * spdiagm(0 => ones(n))) : Matrix{Float64}(σ_safe * I, n, n)
+    end
+
+    if n <= 500
+        B_mat = Matrix{Float64}(B_in)
+        @inbounds for j in 1:n, i in 1:j
+            val = 0.5 * (B_mat[i, j] + B_mat[j, i])
+            B_mat[i, j] = val
+            B_mat[j, i] = val
+        end
+
+        evals = try
+            eigvals(Symmetric(B_mat))
+        catch
+            return issparse(B_in) ? (σ_safe * spdiagm(0 => ones(n))) : Matrix{Float64}(σ_safe * I, n, n)
+        end
+
+        λ_min = minimum(real.(evals))
+        λ_max = maximum(real.(evals))
+
+        if !isfinite(λ_min) || !isfinite(λ_max)
+            return issparse(B_in) ? (σ_safe * spdiagm(0 => ones(n))) : Matrix{Float64}(σ_safe * I, n, n)
+        end
+
+        # Limita escala máxima para evitar estouro numérico no solver QP
+        scale_factor = 1.0
+        if abs(λ_max) > 1e8
+            scale_factor = 1e8 / abs(λ_max)
+            B_mat .*= scale_factor
+            λ_min *= scale_factor
+            λ_max *= scale_factor
+        end
+
+        # Exige autovalor mínimo tanto absoluto (>= 1e-4) quanto relativo (>= 1e-6 * λ_max)
+        # para nunca falhar no teste de Cholesky/PSD interno do Gurobi
+        target_min = max(1e-4, 1e-6 * max(0.0, λ_max))
+        if λ_min < target_min
+            shift = (target_min - λ_min) + 1e-4
+            @inbounds for i in 1:n
+                B_mat[i, i] += shift
+            end
+        end
+
+        return issparse(B_in) ? sparse(B_mat) : B_mat
+    else
+        # Para n > 500: Usa o Teorema dos Círculos de Gershgorin em O(nnz) / O(n^2)
+        B_sym = issparse(B_in) ? sparse(Symmetric(B_in)) : Matrix{Float64}(Symmetric(B_in))
+        row_off_sum = zeros(Float64, n)
+        diag_vals = zeros(Float64, n)
+
+        if issparse(B_sym)
+            rows = rowvals(B_sym)
+            vals = nonzeros(B_sym)
+            @inbounds for col in 1:n
+                for idx in nzrange(B_sym, col)
+                    r = rows[idx]
+                    v = vals[idx]
+                    if r == col
+                        diag_vals[col] = v
+                    else
+                        row_off_sum[col] += abs(v)
+                    end
+                end
+            end
+        else
+            @inbounds for col in 1:n
+                s_off = 0.0
+                for r in 1:n
+                    if r == col
+                        diag_vals[col] = B_sym[r, col]
+                    else
+                        s_off += abs(B_sym[r, col])
+                    end
+                end
+                row_off_sum[col] = s_off
+            end
+        end
+
+        gersh_min = minimum(diag_vals .- row_off_sum)
+        gersh_max = maximum(diag_vals .+ row_off_sum)
+
+        if abs(gersh_max) > 1e8
+            scale_factor = 1e8 / abs(gersh_max)
+            B_sym = B_sym * scale_factor
+            gersh_min *= scale_factor
+            gersh_max *= scale_factor
+        end
+
+        target_min = max(1e-4, 1e-6 * max(0.0, gersh_max))
+        if gersh_min < target_min
+            shift = (target_min - gersh_min) + 1e-4
+            return B_sym + shift * I
+        end
+        return B_sym
+    end
+end
+
+"""
     compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{Float64}, 
               σ_fallback::Float64, problem::OptimizationProblem, x_new::Vector{Float64}, 
               λ::Vector{Float64}, B_old::Union{AbstractMatrix{Float64}, Nothing} = nothing)
@@ -21,26 +127,12 @@ function compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{
     x_prev = x_new - s
 
     if strategy == :exact
-        B_exact = problem.∇²L(x_new, λ)
-        # Salvaguarda de semi-definida positiva (PSD) para problemas não-convexos:
-        # Se B for indefinida, Gurobi e RipQP podem falhar ou rejeitar a matriz.
-        if n <= 500
-            # Para dimensões tratáveis, verifica o menor autovalor
-            B_mat = Matrix{Float64}(B_exact)
-            λ_min = minimum(real.(eigvals(Symmetric(B_mat))))
-            if λ_min < 1e-5
-                shift = abs(λ_min) + 1e-4
-                return issparse(B_exact) ? (B_exact + shift * I) : (B_mat + shift * I)
-            end
-        else
-            # Para n grande, salvaguarda diagonal mínima
-            diag_min = minimum(diag(B_exact))
-            if diag_min < 1e-5
-                shift = abs(diag_min) + 1e-4
-                return B_exact + shift * I
-            end
+        B_exact = try
+            problem.∇²L(x_new, λ)
+        catch
+            return σ_fallback * spdiagm(0 => ones(n))
         end
-        return B_exact
+        return _regularize_symmetric_matrix(B_exact, n, σ_fallback)
 
     elseif strategy == :diag_exact
         B_exact = problem.∇²L(x_new, λ)
@@ -231,11 +323,9 @@ function compute_B(strategy::Symbol, n::Int, s::Vector{Float64}, y_grad::Vector{
         sTr = dot(s, r)
         if sTr > 1e-12 && isfinite(sTr)
             B_new = B_mat + (r * r') / sTr - (Bs * Bs') / sTBs
-            # Simetrização para eliminar erros de arredondamento
-            B_new = 0.5 * (B_new + B_new')
-            return B_new
+            return _regularize_symmetric_matrix(B_new, n, σ_fallback)
         else
-            return B_mat
+            return _regularize_symmetric_matrix(B_mat, n, σ_fallback)
         end
 
     else
