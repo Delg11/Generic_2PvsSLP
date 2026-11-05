@@ -1,0 +1,49 @@
+{
+  "software": {
+    "blas_vendor": "LBTConfig([ILP64] libopenblas64_.so, [LP64] libopenblas.so)",
+    "julia_version": "1.10.11",
+    "julia_commit": "a2b11907d7bf13a98406c77edae25fb9a14cb1c7",
+    "gurobi_version": "13.0.2",
+    "blas_threads": 1
+  },
+  "hyperparameters": {
+    "tau1": 0.1,
+    "rfeas": 1.0e-12,
+    "delta_min": 1.0e-12,
+    "theta0": 0.9,
+    "maxcount": 3,
+    "r_resto": 0.9,
+    "delta0": 0.1,
+    "non_monotone_M": 1,
+    "tolS": 0.0001,
+    "max_iter": 5000,
+    "tolG": 0.001,
+    "tau2": 0.25,
+    "delta_max": 1.0e16,
+    "tolF": 0.05
+  },
+  "execution": {
+    "start_time": "2026-11-04T20:03:31",
+    "end_time": "2026-11-04T20:55:07",
+    "command_line": "src/Generic_main.jl -m filter -w 0 -v 200 -c 100 --tp-sqp all --unif-sqp all --tp-atr-strat all --unif-atr-strat all -i 500 -t 60.0",
+    "mode": "filter",
+    "workers_count": 16,
+    "elapsed_seconds": 2798.549797421
+  },
+  "hardware": {
+    "cpu_model": "znver3",
+    "ram_gb": 124.94,
+    "hostname": "dantzig",
+    "cpu_threads": 32,
+    "os": "Linux (x86_64-linux-gnu)"
+  },
+  "git": {
+    "commit_date": "2026-11-04 19:37:34 -0300",
+    "commit_full": "9019f42ec8c2cd6a323dd197719db5a0b2250c3c",
+    "branch": "main",
+    "is_dirty": true,
+    "commit_message": "04112026",
+    "remote_url": "https://github.com/Delg11/Generic_2PvsSLP",
+    "commit_short": "9019f42"
+  }
+}

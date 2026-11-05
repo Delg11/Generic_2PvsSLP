@@ -1,0 +1,33 @@
+Category,Parameter,Value
+Git Provenance,Commit SHA (Short),9019f42
+Git Provenance,Commit SHA (Full),9019f42ec8c2cd6a323dd197719db5a0b2250c3c
+Git Provenance,Active Branch,main
+Git Provenance,Working Tree Status,DIRTY (Uncommitted modifications present)
+Git Provenance,Commit Date,2026-11-04 19:37:34 -0300
+Git Provenance,Commit Message,04112026
+Git Provenance,Remote URL,https://github.com/Delg11/Generic_2PvsSLP
+Hardware Specs,CPU Model,znver3
+Hardware Specs,Logical Threads / Cores,32
+Hardware Specs,Installed RAM (GB),124.94
+Hardware Specs,Host Machine,dantzig
+Hardware Specs,Operating System,Linux (x86_64-linux-gnu)
+Software Stack,Julia Version,1.10.11
+Software Stack,Julia Commit,a2b11907d7bf13a98406c77edae25fb9a14cb1c7
+Software Stack,LP Solver (Gurobi),13.0.2
+Software Stack,BLAS Config,"LBTConfig([ILP64] libopenblas64_.so, [LP64] libopenblas.so)"
+Software Stack,BLAS Threads,1
+Algorithmic Tolerances,Optimality Tol (tolG),0.001
+Algorithmic Tolerances,Feasibility Tol (tolF),0.05
+Algorithmic Tolerances,Min Step Length (tolS),0.0001
+Algorithmic Tolerances,Initial TR Radius (delta0),0.1
+Algorithmic Tolerances,Max Iterations,5000
+Algorithmic Tolerances,Consecutive Small Steps (maxcount),3
+Algorithmic Tolerances,Restoration Target (theta0),0.9
+Algorithmic Tolerances,Restoration Step Ratio (r_resto),0.9
+Algorithmic Tolerances,Non-monotone Memory (M),1
+Execution Run,Benchmark Mode,filter
+Execution Run,Distributed Workers,16
+Execution Run,Start Time,2026-11-04T20:03:31
+Execution Run,End Time,2026-11-04T20:55:07
+Execution Run,Total Wall Time (s),2798.55
+Execution Run,CLI Command,src/Generic_main.jl -m filter -w 0 -v 200 -c 100 --tp-sqp all --unif-sqp all --tp-atr-strat all --unif-atr-strat all -i 500 -t 60.0
