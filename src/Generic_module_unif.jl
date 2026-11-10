@@ -1,3 +1,16 @@
+"""
+    module Generic_module_unif
+
+Implementa o algoritmo unificado (UNIF) de Programação Linear Sequencial (SLP) e Programação
+Quadrática Sequencial (SQP) com região de confiança para problemas de otimização não-linear com
+restrições de igualdade e canalização em caixa:
+    min f(x)  s.a.  h(x) = 0,  xl <= x <= xu
+
+# Referência Teórica Principal:
+- Gomes, F. A. M., & Senne, T. A. (2011). An SLP algorithm and its application to topology
+  optimization. Computational & Applied Mathematics, 30(1), 53-89.
+  doi: 10.1590/S1807-03022011000100004
+"""
 module Generic_module_unif
 
 export solve_unif_trust_region

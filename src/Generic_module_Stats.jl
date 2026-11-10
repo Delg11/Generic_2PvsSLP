@@ -388,8 +388,8 @@ Act 6: Complete Evolutionary Journey (The Grand Finale)
 end
 
 function _generate_group_plots(df::DataFrame, summary::DataFrame, target_dir::String; criterion::Symbol=:kkt_ok)
-    all_variants = unique(df.Variant)
-    get_existing(wanted::Vector{String}) = intersect(wanted, all_variants)
+    all_variants = string.(unique(df.Variant))
+    get_existing(wanted) = intersect(string.(wanted), all_variants)
     crit_tag = criterion == :kkt_ok ? "KKT_OK" : "Melhor f"
 
     # ---------------------------------------------------------
@@ -544,8 +544,8 @@ function _generate_group_plots(df::DataFrame, summary::DataFrame, target_dir::St
 end
 
 function _generate_paper_plots(df::DataFrame, summary::DataFrame, target_dir::String; criterion::Symbol=:kkt_ok)
-    all_variants = unique(df.Variant)
-    get_existing(wanted::Vector{String}) = intersect(wanted, all_variants)
+    all_variants = string.(unique(df.Variant))
+    get_existing(wanted) = intersect(string.(wanted), all_variants)
     crit_tag = criterion == :kkt_ok ? "KKT OK" : "Best f"
 
     # =========================================================================
@@ -704,18 +704,19 @@ function _generate_paper_plots(df::DataFrame, summary::DataFrame, target_dir::St
     plot_profile(df, act6, :Iterations, "Act 6: Complete Evolutionary Journey (Iters) [$crit_tag]", joinpath(target_dir, "Act_6_Complete_Evolution_Iters.png"); criterion=criterion, paper_mode=true)
 end
 
-function get_best_in_class(class_variants::Vector{String}, summary::DataFrame)
+function get_best_in_class(class_variants, summary::DataFrame)
     if isempty(class_variants) return nothing end
-    sub = summary[in.(summary.Variant, Ref(class_variants)), :]
+    vars = string.(class_variants)
+    sub = summary[in.(string.(summary.Variant), Ref(vars)), :]
     if nrow(sub) == 0 return nothing end
-    return sub[1, :Variant]
+    return string(sub[1, :Variant])
 end
 
 """
 Formats variant names into clean, publication-ready strings in en-US,
 embedding the final success rate in brackets for immediate legibility.
 """
-function format_paper_label(s::String, success_rate::Float64)
+function format_paper_label(s::AbstractString, success_rate::Real)
     rate_str = string(round(success_rate, digits=1), "%")
 
     if s == "BASE_UNIF" return "UNIF Classical Base [$rate_str]" end

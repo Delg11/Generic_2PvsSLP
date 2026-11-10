@@ -1,6 +1,6 @@
 # Aspectos Computacionais, Aritmética Finita e Preservação das Garantias Teóricas em Métodos de Região de Confiança (SLP/SQP)
 
-> **Nota Editorial:** Este documento foi estruturado em formato de seção metodológica de tese/artigo científico para fundamentar as salvaguardas numéricas e operacionais implementadas no arcabouço de avaliação experimental (*benchmarking*) dos algoritmos **UNIF** e **Two-Phase (Dois Estágios)** sob a coleção CUTEst.
+> **Nota Editorial:** Este documento foi estruturado em formato de seção metodológica de tese/artigo científico para fundamentar as salvaguardas numéricas e operacionais implementadas no arcabouço de avaliação experimental (*benchmarking*) dos algoritmos **UNIF** (Gomes & Senne, 2011) e **Two-Phase (Dois Estágios)** (Birgin et al., 2026) sob a coleção CUTEst.
 
 ---
 
@@ -106,4 +106,14 @@ No nível do solucionador de subproblemas (Gurobi), foram impostas três diretri
 Caso deseje incluir um parágrafo conciso na seção de **Configuração Experimental / Detalhes de Implementação** do seu texto acadêmico, pode utilizar diretamente a redação abaixo:
 
 > *"Para assegurar a estabilidade numérica em aritmética de ponto flutuante (IEEE 754) ao longo de toda a coleção CUTEst, as aproximações matriciais densas e esparsas da Hessiana do Lagrangeano ($B_k$, nas variantes Exact e Damped-BFGS) são submetidas a uma salvaguarda de regularização espectral relativa que garante $\beta_{\min} I \preceq B_k \preceq \beta_{\max} I$, com $\beta_{\min} = \max(10^{-4}, 10^{-6}\lambda_{\max}(B_k))$ e $\beta_{\max} = 10^8$ (avaliada via decomposição espectral para $n \le 500$ e via Teorema dos Círculos de Gershgorin para $n > 500$). Do ponto de vista teórico, tal salvaguarda assegura o cumprimento estrito da hipótese clássica de limitação uniforme de $\|B_k\|$ exigida para a convergência global de métodos de Região de Confiança (Conn et al., 2000), ao mesmo tempo em que previne que erros de cancelamento numérico acionem rotinas de ramificação espacial não-convexa no solucionador de subproblemas quadráticos (Gurobi)."*
+
+---
+
+## 6. Referências Principais
+
+- **Birgin, E. G., Bueno, L. F., Martini, T., Moreno, D., Senne, T. A., & Siqueira, T. (2026).** *A general merit function-based global convergent framework for nonlinear optimization*. Computational Optimization and Applications. DOI: [10.1007/s10589-026-00804-1](https://doi.org/10.1007/s10589-026-00804-1).
+- **Gomes, F. A. M., & Senne, T. A. (2011).** *An SLP algorithm and its application to topology optimization*. Computational & Applied Mathematics, 30(1), 53–89. DOI: [10.1590/S1807-03022011000100004](https://doi.org/10.1590/S1807-03022011000100004).
+- **Conn, A. R., Gould, N. I. M., & Toint, P. L. (2000).** *Trust-region methods*. Society for Industrial and Applied Mathematics (SIAM).
+- **Nocedal, J., & Wright, S. J. (2006).** *Numerical Optimization* (2nd ed.). Springer.
+
 

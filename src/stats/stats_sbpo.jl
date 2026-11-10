@@ -75,12 +75,30 @@ function run_statistical_analysis(results_dir::String; target::Symbol=:artigo)
     println("📊 INICIANDO ANÁLISE ESTATÍSTICA SBPO - MODO: $(uppercase(string(target)))")
     println("=" ^ 80)
 
-    unif_file = joinpath(results_dir, "benchmark_slp.csv")
-    tp_file   = joinpath(results_dir, "benchmark_twophase.csv")
+    unif_candidates = ["Consolidated_UNIF.csv", "benchmark_slp.csv", "partial_backup_unif.csv"]
+    tp_candidates   = ["Consolidated_Twophase.csv", "benchmark_twophase.csv", "partial_backup_twophase.csv"]
+
+    unif_file = ""
+    for c in unif_candidates
+        if isfile(joinpath(results_dir, c))
+            unif_file = joinpath(results_dir, c)
+            break
+        end
+    end
+
+    tp_file = ""
+    for c in tp_candidates
+        if isfile(joinpath(results_dir, c))
+            tp_file = joinpath(results_dir, c)
+            break
+        end
+    end
 
     println("Carregando bases de dados de: $results_dir ...")
-    df_unif = isfile(unif_file) ? CSV.read(unif_file, DataFrame) : DataFrame()
-    df_tp   = isfile(tp_file)   ? CSV.read(tp_file, DataFrame)   : DataFrame()
+    println("  UNIF/SLP:  $(isempty(unif_file) ? "não encontrado" : basename(unif_file))")
+    println("  Two-Phase: $(isempty(tp_file) ? "não encontrado" : basename(tp_file))")
+    df_unif = !isempty(unif_file) ? CSV.read(unif_file, DataFrame) : DataFrame()
+    df_tp   = !isempty(tp_file)   ? CSV.read(tp_file, DataFrame)   : DataFrame()
 
     if nrow(df_unif) == 0 && nrow(df_tp) == 0
         println("⚠️ Nenhum dado encontrado em $results_dir. Abortando análise.")

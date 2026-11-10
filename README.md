@@ -1,10 +1,26 @@
 # Generic_2PvsSLP: UNIF and Two-Phase Trust-Region Benchmarking
 
-Este repositório contém o arcabouço computacional e estatístico desenvolvido para avaliar o desempenho de algoritmos de Programação Não-Linear (PNL), comparando abordagens Uniformes (UNIF / SLP Clássico e extensões SQP) contra o método de Região de Confiança de Duas Fases (Two-Phase Trust-Region).
+Este repositório contém o arcabouço computacional e estatístico desenvolvido para avaliar o desempenho de algoritmos de Programação Não-Linear (PNL), comparando abordagens Uniformes (**UNIF** / SLP Clássico e extensões SQP) contra o método de Região de Confiança de Duas Fases (**Two-Phase Trust-Region** / Restauração Inexata).
 
-O projeto realiza uma avaliação modular rigorosa sobre o conjunto de problemas da biblioteca CUTEst, investigando o impacto de passos parabólicos (PH), regiões de confiança anisotrópicas (ATR), regras de concordância estrita (SAR), atualizações de razão de restauração (RRU) e aproximações quase-Newton da Hessiana do Lagrangiano (SQP).
+O projeto realiza uma avaliação modular rigorosa sobre o conjunto de problemas da biblioteca CUTEst, investigando o impacto de passos parabólicos (**PH**), regiões de confiança anisotrópicas (**ATR**), regras de concordância estrita (**SAR**), atualizações de razão de restauração (**RRU**) e aproximações quase-Newton da Hessiana do Lagrangiano (**SQP**).
 
 📊 **[Acesse o Dashboard Interativo de Perfis de Desempenho (Dolan-Moré)](https://delg11.github.io/Generic_2PvsSLP/)**
+
+---
+
+## Fundamentação Teórica e Algorítmica
+
+Os solucionadores implementados baseiam-se em dois modelos teóricos fundamentais da literatura de otimização contínua:
+
+1. **Abordagem Unificada (UNIF - SLP/SQP):**
+   - **Referência:** Gomes, F. A. M., & Senne, T. A. (2011). *An SLP algorithm and its application to topology optimization*. Computational & Applied Mathematics, 30(1), 53–89. [DOI: 10.1590/S1807-03022011000100004](https://doi.org/10.1590/S1807-03022011000100004).
+   - Resolve simultaneamente viabilidade e otimização por meio de uma função de mérito $L_1$ com balanço $\theta$, acionando fase de recuperação de viabilidade quando a linearização local for infactível.
+
+2. **Abordagem de Duas Fases (Two-Phase / Inexact Restoration):**
+   - **Referência:** Birgin, E. G., Bueno, L. F., Martini, T., Moreno, D., Senne, T. A., & Siqueira, T. (2026). *A general merit function-based global convergent framework for nonlinear optimization*. Computational Optimization and Applications. [DOI: 10.1007/s10589-026-00804-1](https://doi.org/10.1007/s10589-026-00804-1).
+   - Desacopla a busca a cada iteração:
+     - **Fase de Restauração:** Minimização de infeabilidade $\|h(x)\|$ até atingir o decréscimo proporcional exigido.
+     - **Fase de Otimização:** Passo tangencial minimizando o modelo da função objetivo restrito ao subespaço tangente linearizado.
 
 ---
 
@@ -15,22 +31,28 @@ Generic_2PvsSLP/
 ├── src/
 │   ├── Generic_main.jl            # Ponto de entrada CLI e orquestrador principal de benchmarks
 │   ├── Generic_Sharedtypes.jl     # Tipos comuns, parâmetros, modelos JuMP compartilhados e GP-norm
-│   ├── Generic_module_Twophase.jl # Solucionador de Região de Confiança de Duas Fases
-│   ├── Generic_module_unif.jl     # Solucionador UNIF (SLP e SQP com região de confiança)
+│   ├── Generic_module_Twophase.jl # Solucionador Two-Phase (Birgin et al., 2026)
+│   ├── Generic_module_unif.jl     # Solucionador UNIF (Gomes & Senne, 2011)
 │   ├── Generic_module_ComputeB.jl # Métodos de atualização quase-Newton (BFGS, SR1, espectral)
 │   ├── worker_env.jl              # Gerenciador de workers distribuídos e JIT warmup compartilhado
 │   ├── reproducibility.jl         # Módulo de proveniência e metadados científicos (Git, CPU, Solvers)
 │   ├── run_fast_benchmark.jl      # Harness de regressão rápida e validação matemática contínua
 │   ├── Generic_module_Stats.jl    # Pipeline de consolidação estatística e perfis de desempenho
-│   └── stats/                     # Scripts estatísticos especializados para tese e artigos
+│   └── stats/                     # Scripts estatísticos especializados para artigos e teses
 │       ├── stats_sbpo.jl          # Análise descritiva para o congresso SBPO
 │       ├── stats_tese_cap3_fprofile.jl # Perfis de função objetivo (Capítulo 3)
 │       └── stats_tese_cap4_sqp.jl # Perfis de desempenho comparativo SQP (Capítulo 4)
-├── benchmarks/
-│   ├── fast_baseline.csv          # Baseline de referência para testes de conformidade matemática
-│   └── Caso_SQP_CUTEST/          # Resultados consolidados e figuras de perfis de desempenho
-├── data/                          # Dados brutos de execuções (.csv)
+├── scripts/
+│   ├── run_cutest_comparison_extended.jl # Comparação estendida com problemas didáticos
+│   ├── generate_cutest_baseline_trajectories.jl # Geração de trajetórias iterativas
+│   ├── generate_ipopt_comparison.jl      # Comparação contra Ipopt (baseline)
+│   └── generate_rosenbrock_videos.jl    # Animações de trajetórias de convergência
+├── benchmarks/                    # Saídas de benchmarks (CSVs consolidados, manifestos)
 ├── analysis/                      # Planilhas (.xlsx) e gráficos gerados (.png)
+├── data/                          # Dados brutos de execuções
+├── run_cutest_benchmark.sh        # Script automatizado para execução no servidor via SSH
+├── CITATION.bib                   # Citações acadêmicas em formato BibTeX
+├── COMPUTATIONAL_SAFEGUARDS_AND_THEORY.md # Fundamentação teórica das salvaguardas numéricas
 ├── index.html                     # Dashboard interativo em React/Plotly.js (GitHub Pages)
 ├── instalar_dependencias.jl       # Script automatizado de configuração do ambiente
 ├── Project.toml / Manifest.toml   # Fixação exata de dependências do ecossistema Julia
@@ -44,66 +66,41 @@ Generic_2PvsSLP/
 O repositório é projetado para classes de Programação Não-Linear com **canalização em caixa** e **restrições de igualdade pura**:
 $$\min_{x \in \mathbb{R}^n} f(x) \quad \text{sujeito a} \quad h(x) = 0, \quad x_l \le x \le x_u$$
 
-### 1. Requisito de Posto e Restrições de Igualdade ($m \le n$)
+### 1. Requisito de Posto e Restrições de Igualdade ($m < n$ ou $m = 0$)
 - **Problemas Válidos:**
   - Irrestritos ou com cotas em caixa ($m = 0$).
-  - Restrições de igualdade com $m \le n$ que satisfaçam a Qualificação de Independência Linear das Restrições (LICQ), ou seja, $\text{posto}(J(x)) = m$.
+  - Restrições de igualdade pura com $m < n$ satisfazendo a Qualificação de Independência Linear das Restrições (LICQ), ou seja, $\text{posto}(J(x)) = m$.
 - **Problemas Fora do Escopo:**
-  - **Sistemas Sobre-Determinados ($m > n$):** Formulações como problemas de mínimos quadrados não-lineares da biblioteca SIF com centenas de equações de resíduos para poucas variáveis (ex: `CHWIRUT1` com $n=3, m=214$, `BROWNDENE` com $n=4, m=20$) não possuem graus de liberdade para otimização sob igualdade pura e são automaticamente descartados pelo filtro.
-  - **Restrições de Desigualdade Gerais ($l_{\text{con}} \ne u_{\text{con}}$):** Devem ser previamente reformuladas com variáveis de folga antes da aplicação direta destes algoritmos.
+  - **Sistemas Sobre-Determinados ($m \ge n$):** Formulações como problemas de mínimos quadrados não-lineares da biblioteca SIF com centenas de equações de resíduos para poucas variáveis não possuem graus de liberdade para otimização sob igualdade pura e são automaticamente descartados pelo filtro.
+  - **Restrições de Desigualdade Gerais:** Devem ser previamente reformuladas com variáveis de folga antes da aplicação direta destes algoritmos.
 
 ### 2. Condição Estrutural da Projeção de Dykstra (GP-Norm e Gradiente Tangente)
-A função [`compute_gradient_projection`](file:///c:/Github/Generic_2PvsSLP/src/Generic_Sharedtypes.jl#L801-L922) utiliza o algoritmo iterativo de Dykstra para projetar simultaneamente nas cotas de caixa $[x_l, x_u]$ e na variedade tangente linearizada $\ker(J(x)) = \{ d \in \mathbb{R}^n : J(x) d = 0 \}$.
-- A projeção afim resolve a cada iteração de Dykstra o sistema de equações normais:
-  $$(J(x) J(x)^T) \lambda_{\text{proj}} = J(x)(y + r) - b$$
-- **Por que $m \le n$ é indispensável:** Se $m > n$, a matriz $J J^T \in \mathbb{R}^{m \times m}$ possui posto no máximo $n < m$, possuindo obrigatoriamente pelo menos $m - n$ autovalores nulos, o que torna $J J^T$ estritamente singular e inviabiliza a fatoração $LU$. O solver conta com salvaguardas com regularização adaptativa e fallback para projeção em caixa caso $J J^T$ seja singular.
+A função [`compute_gradient_projection`](file:///c:/Github/Generic_2PvsSLP/src/Generic_Sharedtypes.jl) utiliza o algoritmo iterativo de Dykstra para projetar simultaneamente nas cotas de caixa $[x_l, x_u]$ e na variedade tangente linearizada $\ker(J(x)) = \{ d \in \mathbb{R}^n : J(x) d = 0 \}$.
 
 ---
 
-## Características Algorítmicas e Correções Teóricas
-
-O repositório implementa rigorosamente a teoria clássica de métodos de região de confiança para PNL com restrições de igualdade e canalização em caixa:
+## Características Algorítmicas e Dimensões de Avaliação
 
 1. **Two-Phase Trust Region:**
-   - **Fase de Restauração:** Minimização de infeabilidade via subproblema linear/quadrático com relaxações L1.
+   - **Fase de Restauração:** Minimização de infeabilidade via subproblema linear/quadrático com relaxações $L_1$.
    - **Fase de Otimização:** Passo tangencial com modelo quadrático ou linear restrito ao subespaço aproximado.
-   - **Função de Mérito com Salvaguarda:** Parâmetro de penalidade $\theta$ estritamente limitado por $\theta = \text{clamp}(\text{numerador} / \text{denominador},\, \theta_{\min},\, \theta_k)$ com $\theta_{\min} = 10^{-6}$, impedindo valores negativos que inverteriam o sentido de otimização.
+   - **Função de Mérito com Salvaguarda:** Parâmetro de penalidade $\theta$ estritamente limitado por $\theta = \text{clamp}(\text{numerador} / \text{denominador},\, \theta_{\min},\, \theta_k)$ com $\theta_{\min} = 10^{-6}$.
 
 2. **UNIF (SLP & SQP Trust Region):**
    - **Vetor Secante da Hessiana do Lagrangiano:** Em problemas com restrições ($m > 0$), o vetor secante quasi-Newton inclui a variação das restrições ponderadas pelos multiplicadores:
      $$y_k = (\nabla f(x_{k+1}) - \nabla f(x_k)) + (J(x_{k+1}) - J(x_k))^T \lambda$$
-     assegurando convergência assintótica superlinear em formulações SQP.
-   - **Critério de Parada e Viabilidade Instantânea:** A viabilidade das restrições $\|h(x)\|_{\infty} \le 10^{-3}$ é avaliada dinamicamente no ponto recém-aceito, prevenindo diagnósticos falsos de infactibilidade.
+   - **Critério de Parada e Viabilidade Instantânea:** Avaliação dinâmica no ponto recém-aceito para $\|h(x)\|_{\infty} \le 10^{-3}$.
 
 3. **Mapeamento de Variantes (Dimensões Algorítmicas):**
    - **SAR (Strong Agreement Rule):** Expansão da região de confiança condicionada à razão $\rho = \text{ared} / \text{pred}$.
    - **PH (Parabolic Heuristic):** Ajuste fino do raio $\delta$ através de interpolação parabólica unidimensional ao longo da direção do passo.
-   - **ATR (Anisotropic Trust Region):** Vetor de raios $\vec{\delta} \in \mathbb{R}^n$ permitindo dilatações e contrações independentes por coordenada com salvaguarda de aspecto (`enforce_aspect_ratio!`).
+   - **ATR (Anisotropic Trust Region):** Vetor de raios $\vec{\delta} \in \mathbb{R}^n$ com estratégias:
+     - `legacy_parabolic`: Curvatura por coordenada via passo parabólico (Gomes & Senne, 2011).
+     - `grad_sign`: Baseada na concordância de sinais do gradiente.
+     - `decomposed_cut`: Cortes decompostos por coordenada.
+     - `secant_box`: Estimativa de curvatura por coordenadas via vetor secante.
    - **RRU (Restoration Ratio Update):** Atualização dinâmica da taxa de contração exigida na fase de restauração.
-   - **SQP (Estratégias de Curvatura):** Suporte a `identity`, `spectral`, `exact` e atualizações de posto 1 e 2 via `Generic_module_ComputeB.jl`.
-
----
-
-## Reprodutibilidade Científica (Artigos e Tese)
-
-Para atender aos mais altos padrões de reprodutibilidade em periódicos internacionais e tese de doutorado, cada execução registra automaticamente metadados completos de proveniência através do módulo [`src/reproducibility.jl`](file:///c:/Github/Generic_2PvsSLP/src/reproducibility.jl):
-
-- **Controle de Versão (Git):** Commit SHA completo, branch ativa, e flag booleana de estado da árvore de trabalho (`git_dirty`).
-- **Ambiente de Hardware:** Modelo do processador (CPU), quantidade de núcleos lógicos e memória física.
-- **Ambiente de Software:** Versão do Julia, Sistema Operacional (OS), arquitetura e contagem de threads/workers.
-- **Versões dos Solvers:** Versões exatas dos pacotes `Gurobi.jl`, `RipQP.jl`, `CUTEst.jl` e `JuMP.jl`.
-
-Ao rodar via `Generic_main.jl`, os metadados são injetados diretamente nas colunas dos CSVs gerados e gravados em arquivos de manifesto `run_metadata.json` e `run_environment.txt` na pasta de benchmark correspondente.
-
----
-
-## Paralelização e Gerenciamento de Workers
-
-O framework possui balanceamento de carga paralelo de granulação fina (`src/worker_env.jl`):
-
-- **Distribuição Granular:** As tarefas são despachadas por par `(problema, variante)` em vez de apenas por problema, garantindo ocupação máxima de todos os workers (100% de utilização de CPU mesmo em baterias pequenas de teste).
-- **Aquecimento de JIT Transparente:** Cada worker inicializado compila previamente os caminhos críticos (resolvendo instâncias de aquecimento com `CUTEstModel("HS6")` e subproblemas JuMP). Isso elimina o tempo artificial de compilação JIT da primeira iteração dos benchmarks.
-- **Sessão Interativa no REPL:** Em sessões longas de desenvolvimento ou via SSH, os workers podem ser mantidos vivos na memória do REPL para rodar múltiplos experimentos sem pagar o custo de inicialização repetidamente.
+   - **SQP (Estratégias de Curvatura):** Suporte a `none` (SLP puro) e aproximações quadráticas: `exact`, `diag_exact`, `bfgs`, `spectral`, `identity`, `quasi_newton`, `reciprocal`, `exponential`.
 
 ---
 
@@ -111,71 +108,109 @@ O framework possui balanceamento de carga paralelo de granulação fina (`src/wo
 
 ### 1. Instalação de Dependências
 
-Certifique-se de ter o Julia 1.10+ instalado com o CUTEst configurado no sistema:
-
 ```bash
 julia instalar_dependencias.jl
 ```
 
 ### 2. Validação Rápida e Teste de Regressão Matemática
 
-Antes de submeter grandes baterias de experimentos, execute o script de validação rápida (conjunto de 12 problemas com restrições e sem restrições, 48 execuções totais):
+Antes de submeter baterias longas, execute a verificação rápida:
 
 ```bash
-# Comparar a execução atual contra o baseline matemático de referência
-julia --project=. src/run_fast_benchmark.jl --compare-baseline
-
-# Atualizar o baseline com a versão atual (se mudanças matemáticas forem aprovadas)
-julia --project=. src/run_fast_benchmark.jl --save-baseline
+# Executa nos problemas didáticos e compara com a referência
+julia --project=. src/run_fast_benchmark.jl
 ```
 
-### 3. Execução Principal de Benchmarks (`Generic_main.jl`)
+### 3. Execução Remota via SSH (`run_cutest_benchmark.sh`)
 
-O script `Generic_main.jl` suporta execução sequencial ou paralela (especificando `-p <nworkers>`):
+Para executar em servidores Linux via SSH com tolerância a desconexões e paralelismo configurado:
 
 ```bash
-# Executar paralelamente com 4 workers no modo 'test' para os problemas HS6 e TRY-B
-julia -p 4 --project=. src/Generic_main.jl -m test -p HS6,TRY-B
+chmod +x run_cutest_benchmark.sh
 
-# Executar bateria completa filtrada do CUTEst (problemas com até 1 restrição)
-julia -p 8 --project=. src/Generic_main.jl -m filter -v -1 -c 1 --run-unif true --run-twophase true
+# Teste rápido de 10 problemas (HS6, ROSENBR, etc.):
+./run_cutest_benchmark.sh test 4
+
+# Bateria completa CUTEst com SLP puro (n <= 200, m <= 100):
+./run_cutest_benchmark.sh slp 16
+
+# Bateria completa massiva (SLP + SQP + todas as variantes ATR):
+nohup ./run_cutest_benchmark.sh all 24 > /dev/null 2>&1 &
+```
+
+### 4. Execução Direta via CLI (`Generic_main.jl`)
+
+```bash
+# Executar paralelamente com 8 workers no modo filtro CUTEst:
+julia --project=. -p 8 src/Generic_main.jl -m filter -v 200 -c 100 -i 500 \
+    --tp-sar all --tp-ph all --tp-atr all --tp-atr-strat all --tp-rru all --tp-sqp none \
+    --unif-sar all --unif-ph all --unif-atr all --unif-atr-strat all --unif-sqp none
 ```
 
 #### Parâmetros de Linha de Comando (CLI)
 
 | Argumento | Atalho | Padrão | Descrição |
-| :--- | :---: | :--- | :--- |
-| `--mode` | `-m` | `test` | Modo de execução: `test` (problemas específicos) ou `filter` (bateria CUTEst). |
+| :--- | :---: | :---: | :--- |
+| `--mode` | `-m` | `test` | Modo: `test` (problemas fixos), `small` (didáticos) ou `filter` (bateria CUTEst). |
 | `--problems` | `-p` | `HS6` | Lista separada por vírgula dos problemas a executar no modo `test`. |
-| `--max-var` | `-v` | `-1` | Número máximo de variáveis permitidas no modo `filter` (-1 para sem limite). |
-| `--max-con` | `-c` | `-1` | Número máximo de restrições permitidas no modo `filter` (-1 para sem limite). |
+| `--workers` | `-w` | `1` | Número de workers (`1` sequencial, `0` auto-detecta CPU threads, `N > 1` paralelo). |
+| `--max-var` | `-v` | `-1` | Número máximo de variáveis no modo `filter` (-1 para sem limite). |
+| `--max-con` | `-c` | `-1` | Número máximo de restrições no modo `filter` (-1 para sem limite). |
+| `--max-iter` | `-i` | `500` | Máximo de iterações externas por variante. |
+| `--timeout` | `-t` | `60.0` | Tempo limite em segundos por variante/problema. |
 | `--run-unif` | | `true` | Ativa/desativa os solucionadores UNIF/SLP/SQP (`true`/`false`). |
 | `--run-twophase`| | `true` | Ativa/desativa os solucionadores Two-Phase (`true`/`false`). |
 | `--unif-sar` | | `all` | Regra de Concordância Estrita no UNIF (`true`, `false`, `all`). |
 | `--unif-ph`  | | `all` | Heurística Parabólica no UNIF (`true`, `false`, `all`). |
 | `--unif-atr` | | `all` | Região de Confiança Anisotrópica no UNIF (`true`, `false`, `all`). |
-| `--unif-sqp` | | `none` | Estratégia de aproximação Hessiana no UNIF (`none`, `identity`, `spectral`, `exact`). |
+| `--unif-atr-strat` | | `legacy_parabolic` | Estratégias ATR no UNIF (`legacy_parabolic`, `grad_sign`, `decomposed_cut`, `secant_box`, `all`). |
+| `--unif-sqp` | | `none` | Estratégia de Hessiana no UNIF (`none`, `quadratic`, `all`, ou lista). |
 | `--tp-sar`   | | `all` | Regra de Concordância Estrita no Two-Phase (`true`, `false`, `all`). |
 | `--tp-ph`    | | `all` | Heurística Parabólica no Two-Phase (`true`, `false`, `all`). |
 | `--tp-atr`   | | `all` | Região de Confiança Anisotrópica no Two-Phase (`true`, `false`, `all`). |
-| `--tp-rru`   | | `true` | Atualização da Razão de Restauração no Two-Phase (`true`, `false`, `all`). |
-| `--tp-sqp`   | | `none` | Estratégia de aproximação Hessiana no Two-Phase (`none`, `identity`, `spectral`, `exact`). |
+| `--tp-atr-strat` | | `legacy_parabolic` | Estratégias ATR no Two-Phase (`legacy_parabolic`, `grad_sign`, `decomposed_cut`, `secant_box`, `all`). |
+| `--tp-rru`   | | `all` | Atualização da Razão de Restauração no Two-Phase (`true`, `false`, `all`). |
+| `--tp-sqp`   | | `none` | Estratégia de Hessiana no Two-Phase (`none`, `quadratic`, `all`, ou lista). |
+| `--qp-solver`| | `gurobi` | Solucionador para subproblemas quadráticos (`gurobi` ou `ripqp`). |
 
 ---
 
-### 4. Geração de Estatísticas e Perfis de Desempenho
+### 5. Geração de Estatísticas e Perfis de Desempenho
 
-Após a conclusão dos benchmarks, consolide os dados e gere as figuras de Perfis de Desempenho (Dolan-Moré):
+Após a conclusão dos benchmarks, os gráficos e tabelas são gerados automaticamente pelo script shell. Caso queira processar manualmente:
 
-```julia
-include("src/Generic_module_Stats.jl")
-using .Generic_module_Stats
-
-# Processa os CSVs brutos e gera as planilhas e gráficos em analysis/
-Generic_module_Stats.run_statistical_analysis("data/")
+```bash
+julia --project=. src/min_run_stats.jl
 ```
 
-Para reproduzir os perfis específicos de capítulos de tese ou artigos, execute os scripts dedicados em `src/stats/`:
-- `julia --project=. src/stats/stats_tese_cap3_fprofile.jl`
-- `julia --project=. src/stats/stats_tese_cap4_sqp.jl`
-- `julia --project=. src/stats/stats_sbpo.jl`
+Ou diretamente pelos scripts dedicados em `src/stats/`:
+- `julia --project=. src/stats/stats_sbpo.jl` (Perfis dos Grupos G1 a G6 e Resumo Expandido)
+- `julia --project=. src/stats/stats_tese_cap3_fprofile.jl` (Perfis baseados em valor de função viável)
+- `julia --project=. src/stats/stats_tese_cap4_sqp.jl` (Perfis comparativos das variantes SQP)
+
+---
+
+## Citação Acadêmica
+
+Se este código ou seus dados forem úteis em sua pesquisa, cite as referências teóricas correspondentes (disponíveis em [`CITATION.bib`](file:///c:/Github/Generic_2PvsSLP/CITATION.bib)):
+
+```bibtex
+@article{senne:09,
+  title={An SLP algorithm and its application to topology optimization},
+  author={Gomes, Francisco A. M. and Senne, Thadeu A.},
+  journal={Computational \& Applied Mathematics},
+  volume={30},
+  number={1},
+  pages={53--89},
+  year={2011},
+  doi={10.1590/S1807-03022011000100004}
+}
+
+@article{birgin:24,
+  title={A general merit function-based global convergent framework for nonlinear optimization},
+  author={Birgin, Ernesto G. and Bueno, Lu{\'i}s Felipe and Martini, Tiara and Moreno, Dimary and Senne, Thadeu A. and Siqueira, Thiago},
+  journal={Computational Optimization and Applications},
+  year={2026},
+  doi={10.1007/s10589-026-00804-1}
+}
+```

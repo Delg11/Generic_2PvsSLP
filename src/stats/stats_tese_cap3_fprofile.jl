@@ -43,12 +43,30 @@ function run_statistical_analysis(results_dir::String)
     println("📊 INICIANDO ANÁLISE F-PROFILE (CAPÍTULO 3 - TESE)")
     println("=" ^ 80)
 
-    slp_file = joinpath(results_dir, "benchmark_slp.csv")
-    tp_file   = joinpath(results_dir, "benchmark_twophase.csv")
+    slp_candidates = ["Consolidated_UNIF.csv", "benchmark_slp.csv", "partial_backup_unif.csv"]
+    tp_candidates  = ["Consolidated_Twophase.csv", "benchmark_twophase.csv", "partial_backup_twophase.csv"]
+
+    slp_file = ""
+    for c in slp_candidates
+        if isfile(joinpath(results_dir, c))
+            slp_file = joinpath(results_dir, c)
+            break
+        end
+    end
+
+    tp_file = ""
+    for c in tp_candidates
+        if isfile(joinpath(results_dir, c))
+            tp_file = joinpath(results_dir, c)
+            break
+        end
+    end
 
     println("Carregando bases de dados de: $results_dir ...")
-    df_slp = isfile(slp_file) ? CSV.read(slp_file, DataFrame) : DataFrame()
-    df_tp   = isfile(tp_file)   ? CSV.read(tp_file, DataFrame)   : DataFrame()
+    println("  UNIF/SLP:  $(isempty(slp_file) ? "não encontrado" : basename(slp_file))")
+    println("  Two-Phase: $(isempty(tp_file) ? "não encontrado" : basename(tp_file))")
+    df_slp = !isempty(slp_file) ? CSV.read(slp_file, DataFrame) : DataFrame()
+    df_tp  = !isempty(tp_file)  ? CSV.read(tp_file, DataFrame)  : DataFrame()
 
     if nrow(df_slp) == 0 && nrow(df_tp) == 0
         println("⚠️ Nenhum dado encontrado em $results_dir. Abortando análise.")

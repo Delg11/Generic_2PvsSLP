@@ -239,5 +239,5 @@ if abspath(PROGRAM_FILE) == @__FILE__
 end
 
 # Execução interativa para o REPL do VS Code (descomente para executar direto com Shift+Enter / Ctrl+Enter)
-run_fast_benchmark(num_workers=1, compare_baseline=true)
+# run_fast_benchmark(num_workers=1, compare_baseline=true)
 # stop_workers()

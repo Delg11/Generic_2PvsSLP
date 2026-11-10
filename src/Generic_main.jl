@@ -1,5 +1,8 @@
 # ==============================================================================
-# Proprietary Software • All Rights Reserved
+# Generic_main.jl - UNIF and Two-Phase Trust-Region Optimization Benchmark CLI
+# ==============================================================================
+# Benchmarking framework comparing UNIF (Gomes & Senne, 2011) and Two-Phase
+# (Birgin et al., 2026) methods on the CUTEst problem collection.
 # ==============================================================================
 # 1. IMPORTS AND INCLUDES
 # ==============================================================================
@@ -40,9 +43,9 @@ function parse_commandline()
             arg_type = Int
             default = -1
         "--max-iter", "-i"
-            help = "Maximum outer iterations per variant (default: 2000)."
+            help = "Maximum outer iterations per variant (default: 500)."
             arg_type = Int
-            default = 2000
+            default = 500
         "--timeout", "-t"
             help = "Maximum wall-clock time in seconds per variant (default: 60.0s, <=0 for unlimited)."
             arg_type = Float64
@@ -175,11 +178,12 @@ const QP_SOLVER_CHOICE = Symbol(args["qp-solver"])
 
 function build_twophase_params(sar, M, ph, atr, rru, use_quad, b_strat; atr_strat::Symbol=:legacy_parabolic, qp_solver::Symbol=QP_SOLVER_CHOICE)
     return SharedTypes.TwoPhaseParams(
-        max_outer_iter = common_max_iter, max_time = common_timeout, δ0_opt = common_delta0, δ0_resto = common_delta0,
-        tolG = common_tolG, tolF = common_tolF, tolS = common_tolS, maxcount = common_maxcount,
-        verbose_out = common_verbose, use_unif_stopping = true, rfeas = 1e-12, δmin = 1e-12, 
-        δmax = 1e16, r_resto = 0.9, τ1 = 0.1, τ2 = 0.25, αL = 1e-8, αR = 1e-8,
-        θ0 = 0.90, αΦ = 1e-8, max_iter_resto = 500, verbose_in = common_verbose, debugverbose = false,
+        max_outer_iter = common_max_iter, max_time = common_timeout, δ0_opt = 0.20, δ0_resto = 0.20,
+        tol = 1e-3, tolG = common_tolG, tolF = common_tolF, tolS = common_tolS, maxcount = common_maxcount,
+        verbose_out = common_verbose, use_unif_stopping = true, rfeas = 1e-12, δmin = 1e-4, 
+        δmax = 1.0, r_resto = 0.8, τ1 = 0.10, τ2 = 0.25, τ3 = 0.40, αL = 1e-8, αR = 1e-8,
+        θ0 = 0.90, αΦ = (1.0 - 0.90) / 2.0, max_iter_resto = 50, max_iter_opt = 50,
+        parabolic_min_increase_ratio = 1.5, verbose_in = common_verbose, debugverbose = false,
         strong_agreement_rule = sar, non_monotone_M = M, parabolic_heuristic = ph, anisotropic_trust_region = atr,
         atr_strategy = atr_strat, restoration_ratio_update = rru,
         use_quadratic = use_quad, B_update_strategy = b_strat, quadratic_solver = qp_solver
@@ -200,7 +204,7 @@ end
 twophase_variants = []
 if RUN_TWOPHASE
     tp_sar_opts = args["tp-sar"] == "all" ? [false, true] : (args["tp-sar"] == "true" ? [true] : [false])
-    tp_rru_opts = [true] # Forçado para true conforme restrição
+    tp_rru_opts = args["tp-rru"] == "all" ? [false, true] : (args["tp-rru"] == "true" ? [true] : [false])
     tp_ph_opts  = args["tp-ph"]  == "all" ? [false, true] : (args["tp-ph"]  == "true" ? [true] : [false])
     tp_atr_opts = args["tp-atr"] == "all" ? [false, true] : (args["tp-atr"] == "true" ? [true] : [false])
     tp_atr_strats = parse_atr_strat_args(args["tp-atr-strat"])
@@ -210,7 +214,7 @@ if RUN_TWOPHASE
     M = 1
     for sar in tp_sar_opts, rru in tp_rru_opts, ph in tp_ph_opts, atr in tp_atr_opts, strat in sqp_strategies
         if !ph && atr continue end
-        if ph && sar continue end
+        if ph && sar continue end # Se PH=true, SAR não ocorre (conflito conceitual). Evita rodar variantes idênticas.
         
         active_atr_strats = atr ? tp_atr_strats : [:legacy_parabolic]
         for atr_st in active_atr_strats
@@ -245,7 +249,7 @@ if RUN_UNIF
 
     for sar in unif_sar_opts, ph in unif_ph_opts, atr in unif_atr_opts, strat in sqp_strategies
         if !ph && atr continue end
-        if ph && sar continue end
+        if ph && sar continue end # Se PH=true, SAR não ocorre (conflito conceitual). Evita rodar variantes idênticas.
 
         active_atr_strats = atr ? unif_atr_strats : [:legacy_parabolic]
         for atr_st in active_atr_strats
@@ -298,7 +302,7 @@ elseif args["mode"] == "filter"
     end
     raw_problems = select_sif_problems(; filters...)
     println("Candidate problems from CUTEst classification: $(length(raw_problems))")
-    print("🔍 Validating mathematical compatibility (m <= n, pure equality/bounds)... ")
+    print("🔍 Validating mathematical compatibility (m < n, pure equality/bounds)... ")
     problems = String[]
     for p in raw_problems
         local nlp = nothing
@@ -306,7 +310,7 @@ elseif args["mode"] == "filter"
             nlp = CUTEstModel{Float64}(p; decode=true)
             n = nlp.meta.nvar
             m = nlp.meta.ncon
-            is_compat = (m == 0) || (m <= n && m == length(nlp.meta.jfix))
+            is_compat = (m == 0) || (m < n && m == length(nlp.meta.jfix))
             if is_compat
                 push!(problems, p)
             end

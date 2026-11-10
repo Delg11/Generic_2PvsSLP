@@ -75,12 +75,30 @@ function run_statistical_analysis(results_dir::String)
     println("📊 STARTING CONSOLIDATED ANALYSIS AND STATISTICS")
     println("=" ^ 80)
 
-    unif_file = joinpath(results_dir, "partial_backup_unif.csv")
-    tp_file   = joinpath(results_dir, "partial_backup_twophase.csv")
+    unif_candidates = ["Consolidated_UNIF.csv", "benchmark_slp.csv", "partial_backup_unif.csv"]
+    tp_candidates   = ["Consolidated_Twophase.csv", "benchmark_twophase.csv", "partial_backup_twophase.csv"]
+
+    unif_file = ""
+    for c in unif_candidates
+        if isfile(joinpath(results_dir, c))
+            unif_file = joinpath(results_dir, c)
+            break
+        end
+    end
+
+    tp_file = ""
+    for c in tp_candidates
+        if isfile(joinpath(results_dir, c))
+            tp_file = joinpath(results_dir, c)
+            break
+        end
+    end
 
     println("Loading databases...")
-    df_unif = isfile(unif_file) ? CSV.read(unif_file, DataFrame) : DataFrame()
-    df_tp   = isfile(tp_file)   ? CSV.read(tp_file, DataFrame)   : DataFrame()
+    println("  UNIF/SLP:  $(isempty(unif_file) ? "not found" : basename(unif_file))")
+    println("  Two-Phase: $(isempty(tp_file) ? "not found" : basename(tp_file))")
+    df_unif = !isempty(unif_file) ? CSV.read(unif_file, DataFrame) : DataFrame()
+    df_tp   = !isempty(tp_file)   ? CSV.read(tp_file, DataFrame)   : DataFrame()
 
     if nrow(df_unif) == 0 && nrow(df_tp) == 0
         println("⚠️ No data found to process. Exiting analysis.")

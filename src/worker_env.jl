@@ -47,7 +47,7 @@ const get_status_string = get_status_name
 Resolve as 4 variantes de teste para um problema CUTEst.
 """
 function solve_fast_benchmark_problem(prob_name::String, max_iter::Int; decode::Bool=false)
-    delta0   = 0.1
+    delta0   = 0.20
     tolG     = 1e-3
     tolF     = 5e-2
     tolS     = 1e-4
@@ -55,10 +55,10 @@ function solve_fast_benchmark_problem(prob_name::String, max_iter::Int; decode::
 
     tp_base = SharedTypes.TwoPhaseParams(
         max_outer_iter = max_iter, δ0_opt = delta0, δ0_resto = delta0,
-        tolG = tolG, tolF = tolF, tolS = tolS, maxcount = maxcount,
+        tol = 1e-3, tolG = tolG, tolF = tolF, tolS = tolS, maxcount = maxcount,
         verbose_out = false, verbose_in = false, debugverbose = false,
-        use_unif_stopping = true, rfeas = 1e-12, δmin = 1e-12, δmax = 1e16,
-        r_resto = 0.9, τ1 = 0.1, τ2 = 0.25, τ3 = 2.0, αL = 1e-8, αR = 1e-8,
+        use_unif_stopping = true, rfeas = 1e-12, δmin = 1e-4, δmax = 1.0,
+        r_resto = 0.8, τ1 = 0.10, τ2 = 0.25, τ3 = 0.40, αL = 1e-8, αR = 1e-8,
         θ0 = 0.90, strong_agreement_rule = true, parabolic_heuristic = false,
         anisotropic_trust_region = false, restoration_ratio_update = false,
         use_quadratic = false, non_monotone_M = 1
@@ -66,24 +66,25 @@ function solve_fast_benchmark_problem(prob_name::String, max_iter::Int; decode::
 
     tp_iso = SharedTypes.TwoPhaseParams(
         max_outer_iter = max_iter, δ0_opt = delta0, δ0_resto = delta0,
-        tolG = tolG, tolF = tolF, tolS = tolS, maxcount = maxcount,
+        tol = 1e-3, tolG = tolG, tolF = tolF, tolS = tolS, maxcount = maxcount,
         verbose_out = false, verbose_in = false, debugverbose = false,
-        use_unif_stopping = true, rfeas = 1e-12, δmin = 1e-12, δmax = 1e16,
-        r_resto = 0.9, τ1 = 0.1, τ2 = 0.25, τ3 = 2.0, αL = 1e-8, αR = 1e-8,
-        θ0 = 0.90, strong_agreement_rule = false, parabolic_heuristic = true,
+        use_unif_stopping = true, rfeas = 1e-12, δmin = 1e-4, δmax = 1.0,
+        r_resto = 0.8, τ1 = 0.10, τ2 = 0.25, τ3 = 0.40, αL = 1e-8, αR = 1e-8,
+        θ0 = 0.90, strong_agreement_rule = true, parabolic_heuristic = true,
+        parabolic_min_increase_ratio = 1.5,
         anisotropic_trust_region = false, restoration_ratio_update = false,
         use_quadratic = false, non_monotone_M = 1
     )
 
     unif_base = SharedTypes.UNIFParams(
-        maxiter = max_iter, delta0 = delta0, tolG = tolG, tolF = tolF, tolS = tolS,
+        maxiter = max_iter, delta0 = 0.10, tolG = tolG, tolF = tolF, tolS = 1e-4,
         maxcount = maxcount, verbose = false,
         strong_agreement_rule = true, parabolic_heuristic = false,
         anisotropic_trust_region = false, use_quadratic = false
     )
 
     unif_iso = SharedTypes.UNIFParams(
-        maxiter = max_iter, delta0 = delta0, tolG = tolG, tolF = tolF, tolS = tolS,
+        maxiter = max_iter, delta0 = 0.10, tolG = tolG, tolF = tolF, tolS = 1e-4,
         maxcount = maxcount, verbose = false,
         strong_agreement_rule = false, parabolic_heuristic = true,
         anisotropic_trust_region = false, use_quadratic = false

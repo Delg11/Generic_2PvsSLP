@@ -1,3 +1,20 @@
+"""
+    module Generic_module_Twophase
+
+Implementa o método de Região de Confiança de Dois Estágios / Duas Fases (Two-Phase / Inexact Restoration)
+para problemas de Programação Não-Linear com restrições de igualdade pura e canalização em caixa:
+    min f(x)  s.a.  h(x) = 0,  xl <= x <= xu
+
+O algoritmo desacopla a busca em duas fases a cada iteração:
+  1. Fase de Restauração: reduz a infeabilidade ||h(x)|| minimizando modelo linear/quadrático;
+  2. Fase de Otimização: reduz a função objetivo ou Lagrangeano no subespaço tangente com passo s.
+
+# Referência Teórica Principal:
+- Birgin, E. G., Bueno, L. F., Martini, T., Moreno, D., Senne, T. A., & Siqueira, T. (2026).
+  A general merit function-based global convergent framework for nonlinear optimization.
+  Computational Optimization and Applications.
+  doi: 10.1007/s10589-026-00804-1
+"""
 module Generic_module_Twophase
 
 export create_optimized_model, restoration_phase, optimization_phase, two_phase_optimization
@@ -290,9 +307,8 @@ end
 
 # Solves the tangent step optimization subproblem
 # min ∇f'·s  s.t. ∇h'·s = -h, bounds
-function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::T, problem::OptimizationProblem, buffers::OptimizedBuffers, params::TwoPhaseParams, B::Union{AbstractMatrix, Nothing}) where {T<:Union{Float64, Vector{Float64}}}
+function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::T, problem::OptimizationProblem, buffers::OptimizedBuffers, params::TwoPhaseParams, B::Union{AbstractMatrix, Nothing}; update_coeffs::Bool=true) where {T<:Union{Float64, Vector{Float64}}}
     m = length(buffers.h_old)
-    grad_L = buffers.∇f + transpose(buffers.∇h) * buffers.λ
     
     # # Define quadratic matrix
     local Hqp
@@ -362,22 +378,24 @@ function solve_optimization_subproblem!(model::JuMP.Model, n::Int, δ::T, proble
     end
 
     # Safeguard against non-finite coefficients (NaN/Inf in gradient or Hessian)
-    if any(!isfinite, buffers.∇f) || any(!isfinite, grad_L) || (params.use_quadratic && (Hqp !== nothing && any(!isfinite, Hqp)))
+    if any(!isfinite, buffers.∇f) || (params.use_quadratic && (Hqp !== nothing && any(!isfinite, Hqp)))
         return false, 0.0
     end
 
-    if params.use_quadratic
-        @objective(model, Min, 0.5 * dot(s, Hqp * s) + dot(buffers.∇f, s))
-    else
-        @inbounds for j in 1:n
-            set_objective_coefficient(model, s[j], grad_L[j])
+    if update_coeffs
+        if params.use_quadratic
+            @objective(model, Min, 0.5 * dot(s, Hqp * s) + dot(buffers.∇f, s))
+        else
+            @inbounds for j in 1:n
+                set_objective_coefficient(model, s[j], buffers.∇f[j])
+            end
         end
-    end
 
-    @inbounds for i in 1:m
-        set_normalized_rhs(con[i], 0.0)
-        for j in 1:n
-            set_normalized_coefficient(con[i], s[j], buffers.∇h[i, j])
+        @inbounds for i in 1:m
+            set_normalized_rhs(con[i], 0.0)
+            for j in 1:n
+                set_normalized_coefficient(con[i], s[j], buffers.∇h[i, j])
+            end
         end
     end
 
@@ -422,6 +440,8 @@ function optimization_phase(
     history::Bool=true,
     F_y::Float64=NaN,
     h_y::Union{Vector{Float64}, Nothing}=nothing,
+    grad_y::Union{Vector{Float64}, Nothing}=nothing,
+    jac_y::Union{AbstractMatrix{Float64}, Nothing}=nothing,
     F_xk::Float64=NaN,
     h_xk::Union{Vector{Float64}, Nothing}=nothing,
     t_start_alg::Float64=0.0
@@ -447,8 +467,8 @@ function optimization_phase(
     params.debugverbose && println("🔍 [DEBUG-OPT] Initial state: F(y^k)=$F_y_val, ||h(y^k)||=$norm_h_y, δ=$δ")
     params.debugverbose && println("🔍 [DEBUG-OPT] History sizes - Lagrangian: $(length(lagrangian_history)), Merit: $(length(merit_history))")
 
-    buffers.∇f = problem.∇f(buffers.x_temp)
-    buffers.∇h = problem.∇h(buffers.x_temp)
+    buffers.∇f = grad_y === nothing ? problem.∇f(buffers.x_temp) : grad_y
+    buffers.∇h = jac_y === nothing ? problem.∇h(buffers.x_temp) : jac_y
 
     use_new_atr = params.anisotropic_trust_region && params.atr_strategy != :legacy_parabolic
     g_prev_opt = if use_new_atr
@@ -478,7 +498,7 @@ function optimization_phase(
         # Step 2: Find z^{ℓ,j} by solving the subproblem
         # Step 3: Choose λ 
         # =========================================================
-        success, f_model = solve_optimization_subproblem!(model_opt, n, δ, problem, buffers, params, B) # 
+        success, f_model = solve_optimization_subproblem!(model_opt, n, δ, problem, buffers, params, B; update_coeffs=(j == 0)) # 
         # !params.use_quadratic && (buffers.λ .= 0.0)
         if !success
             δ = max.(params.τ2 .* δ, params.δmin)
@@ -580,12 +600,12 @@ function optimization_phase(
         
         Phi_y_thetak = compute_merit_functions(buffers.λ, θ_k, h_y_val, F_y_val)
         Phi_xk_thetak = compute_merit_functions(λ_k, θ_k, h_xk_val, F_xk_val)
-        # # Non-Monotonic Heuristic for Theta's test
         ref_merit_thetak = isempty(merit_history) ? Phi_xk_thetak : max(Phi_xk_thetak, maximum(merit_history))
+        drop_req_theta = params.αΦ * norm_h_xk
         params.debugverbose && println("🔍 [DEBUG-OPT] --- Theta Update ---")
         params.debugverbose && println("🔍 [DEBUG-OPT] Φ(y^k, θ_k): $Phi_y_thetak")
-        params.debugverbose && println("🔍 [DEBUG-OPT] Ref Φ(x^k, θ_k): $ref_merit_thetak, Drop req: $(params.αΦ * norm_h_xk)")
-        if Phi_y_thetak <= ref_merit_thetak - params.αΦ * norm_h_xk
+        params.debugverbose && println("🔍 [DEBUG-OPT] Ref Φ(x^k, θ_k): $ref_merit_thetak, Drop req: $drop_req_theta")
+        if (norm_h_xk - norm_h_y <= 1e-12) || (Phi_y_thetak <= ref_merit_thetak - drop_req_theta)
             θ = θ_k
             params.debugverbose && println("🔍 [DEBUG-OPT] Condition met. Keeping θ = $θ")
         else
@@ -595,10 +615,10 @@ function optimization_phase(
             params.debugverbose && println("🔍 [DEBUG-OPT] Condition failed. Updating θ...")
             params.debugverbose && println("🔍 [DEBUG-OPT] Numerator: $numerador, Denominator: $denominador")
             
-            if abs(denominador) > 1e-12
+            if abs(denominador) > 1e-12 && (numerador / denominador) > 0
                 θ = clamp(numerador / denominador, params.θmin, θ_k)
             else
-                params.debugverbose && println("⚠️ [DEBUG-OPT] Denominator too small, falling back to θ_k.")
+                params.debugverbose && println("⚠️ [DEBUG-OPT] Denominator too small or ratio non-positive, falling back to θ_k.")
                 θ = θ_k
             end
         end
@@ -611,7 +631,8 @@ function optimization_phase(
         Phi_xk_theta = compute_merit_functions(λ_k, θ, h_xk_val, F_xk_val)
         # Non-Monotonic Heuristic for Final Merit
         ref_merit_theta = isempty(merit_history) ? Phi_xk_theta : max(Phi_xk_theta, maximum(merit_history))
-        merit_threshold = ref_merit_theta - params.αΦ * norm_h_xk
+        drop_req_merit = (norm_h_xk <= params.tol) ? min(params.αΦ * norm_h_xk, params.αL * step_norm_sq) : params.αΦ * norm_h_xk
+        merit_threshold = ref_merit_theta - drop_req_merit
         params.debugverbose && println("🔍 [DEBUG-OPT] --- Merit Function Check ---")
         params.debugverbose && println("🔍 [DEBUG-OPT] Φ(z^j, θ): $Phi_zj_theta")
         params.debugverbose && println("🔍 [DEBUG-OPT] Ref Φ(x^k, θ): $ref_merit_theta")
@@ -744,6 +765,10 @@ function optimization_phase(
                 )
             end
         end
+
+        # Limite inferior de segurança para o delta (garantir passo mínimo na próxima iteração após passo aceito)
+        delta_floor = use_new_atr ? params.δmin : 1e-4
+        δ = max.(δ, delta_floor)
         break 
     end
 
@@ -810,7 +835,8 @@ function two_phase_optimization(
         f_current = problem.f(x)
         h_current = problem.h(x)
         norm_h_current = norm(h_current)
-        buffers.∇f_old = problem.∇f(x)
+        grad_f_current = problem.∇f(x)
+        buffers.∇f_old = copy(grad_f_current)
         
         # Initial state population in non-monotonic history
         push!(lagrangian_history, f_current + dot(λ, h_current))
@@ -851,7 +877,7 @@ function two_phase_optimization(
         end
         # Create models
         sub_tl = params.max_time > 0 ? min(5.0, params.max_time) : 5.0
-        model_restaura = create_optimized_model(solver_choice, :restauracao, n, m; env=GRB_ENV, use_quadratic=false, sub_time_limit=sub_tl)
+        model_restaura = m > 0 ? create_optimized_model(solver_choice, :restauracao, n, m; env=GRB_ENV, use_quadratic=false, sub_time_limit=sub_tl) : nothing
         model_opt = create_optimized_model(solver_choice, :otimizacao, n, m; env=GRB_ENV, use_quadratic=params.use_quadratic, sub_time_limit=sub_tl)
         # Table header
         if verbose || logio !== nothing
@@ -953,11 +979,15 @@ function two_phase_optimization(
                 end
                 F_y_pass = NaN
                 h_y_pass = h_resto
+                grad_y_pass = nothing
+                jac_y_pass = nothing
             else
                 y = copy(x)
                 success_resto = true
                 F_y_pass = f_current
                 h_y_pass = h_current
+                grad_y_pass = grad_f_current
+                jac_y_pass = jac_h
             end
             # ================================================================
             # Step 2: OPTIMIZATION PHASE
@@ -983,6 +1013,8 @@ function two_phase_optimization(
                 history = history,
                 F_y = F_y_pass,
                 h_y = h_y_pass,
+                grad_y = grad_y_pass,
+                jac_y = jac_y_pass,
                 F_xk = f_current,
                 h_xk = h_current,
                 t_start_alg = t_start_alg
@@ -1008,7 +1040,9 @@ function two_phase_optimization(
             
             # --- Recalculate Gradients at new point ---
             grad_f_new = grad_f_opt_new
-            jac_h_new = problem.∇h(x)
+            grad_f_current = grad_f_new
+            jac_h_new = Δx > 0.0 ? problem.∇h(x) : jac_h
+            jac_h = jac_h_new
             Lgrad = grad_f_new + jac_h_new' * λ
 
             # ================================================================
@@ -1028,20 +1062,22 @@ function two_phase_optimization(
             end
 
             # --- Recalculate GP Norm (AGP) ---
-            gradpbox = compute_gradient_projection(
-                x, grad_f_new, jac_h_new, λ, problem.xl, problem.xu;
-                norm_type = params.norm_gpnorm,
-                strategy = params.gpnorm_strategy,
-                max_iter = params.gpnorm_max_iter,
-                tol = params.gpnorm_tol,
-                debug = params.gpnorm_debug
-            )
-            gpnorm = norm(gradpbox, params.norm_gpnorm)
-            params.debugverbose && println("DEBUG: GPnorm recalculated: $gpnorm")
-            if params.gpnorm_div_nelem
-                gpnorm /= n
+            if Δx > 0.0
+                gradpbox = compute_gradient_projection(
+                    x, grad_f_new, jac_h_new, λ, problem.xl, problem.xu;
+                    norm_type = params.norm_gpnorm,
+                    strategy = params.gpnorm_strategy,
+                    max_iter = params.gpnorm_max_iter,
+                    tol = params.gpnorm_tol,
+                    debug = params.gpnorm_debug
+                )
+                gpnorm = norm(gradpbox, params.norm_gpnorm)
+                params.debugverbose && println("DEBUG: GPnorm recalculated: $gpnorm")
+                if params.gpnorm_div_nelem
+                    gpnorm /= n
+                end
+                params.debugverbose && println("DEBUG: GPnorm after division (if applicable): $gpnorm")
             end
-            params.debugverbose && println("DEBUG: GPnorm after division (if applicable): $gpnorm")
             iter += 1
             if history
                 x_hist[iter + 1] = copy(x)
@@ -1070,7 +1106,8 @@ function two_phase_optimization(
                 else
                     countF = 0
                 end
-                if Δx <= params.tolS
+                step_trial_norm = norm(buffers.s_val, Inf)
+                if (success_opt && Δx <= params.tolS) || (!success_opt && step_trial_norm <= params.tolS)
                     countS += 1
                 else
                     countS = 0

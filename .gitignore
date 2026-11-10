@@ -24,5 +24,9 @@ docs/site/
 Manifest.toml
 src/Stats_cap3.jl
 
+# Logs
+*.log
+logs/
+
 # SBPO papers, presentations and draft manuscripts (confidential / unpublished)
 SBPO*/

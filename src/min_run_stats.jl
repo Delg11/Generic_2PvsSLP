@@ -9,30 +9,40 @@
 #    :tese_cap4    -> Tese Capítulo 4 (extensão SQP / aproximações Hessianas)
 target_analysis = :sbpo_artigo
 
-# 2. Caminho para a pasta contendo os dados (benchmark_slp.csv / benchmark_twophase.csv)
-results_dir = normpath(joinpath(@__DIR__, "..", "benchmarks", "Caso_SQP_CUTEST"))
-# Exemplos alternativos:
-# results_dir = normpath(joinpath(@__DIR__, "..", "data"))
-# results_dir = normpath(joinpath(@__DIR__, "..", "benchmarks", "Benchmark_Results_2026-XX-XX_XX-XX"))
+# 2. Caminho para a pasta contendo os dados (Consolidated_*.csv ou benchmark_*.csv)
+# Se não for informado, busca a subpasta mais recente em benchmarks/
+function find_default_results_dir()
+    benchmarks_dir = normpath(joinpath(@__DIR__, "..", "benchmarks"))
+    entries = filter(d -> isdir(joinpath(benchmarks_dir, d)) && !startswith(d, "."), readdir(benchmarks_dir))
+    if !isempty(entries)
+        # Ordena para pegar a pasta mais recente
+        sorted_entries = sort(entries; rev=true)
+        return joinpath(benchmarks_dir, sorted_entries[1])
+    end
+    return normpath(joinpath(@__DIR__, "..", "data"))
+end
+
+results_dir = get(ENV, "BENCHMARK_RESULTS_DIR", find_default_results_dir())
+println("📂 Diretório de resultados selecionado: $results_dir")
 
 # 3. Disparo da análise selecionada
 if target_analysis == :sbpo_artigo
-    include("stats/stats_sbpo.jl")
+    include(normpath(joinpath(@__DIR__, "stats", "stats_sbpo.jl")))
     using .StatsSBPO
     StatsSBPO.run_statistical_analysis(results_dir; target=:artigo)
 
 elseif target_analysis == :sbpo_resumo
-    include("stats/stats_sbpo.jl")
+    include(normpath(joinpath(@__DIR__, "stats", "stats_sbpo.jl")))
     using .StatsSBPO
     StatsSBPO.run_statistical_analysis(results_dir; target=:resumo)
 
 elseif target_analysis == :tese_cap3
-    include("stats/stats_tese_cap3_fprofile.jl")
+    include(normpath(joinpath(@__DIR__, "stats", "stats_tese_cap3_fprofile.jl")))
     using .StatsCap3FProfile
     StatsCap3FProfile.run_statistical_analysis(results_dir)
 
 elseif target_analysis == :tese_cap4
-    include("stats/stats_tese_cap4_sqp.jl")
+    include(normpath(joinpath(@__DIR__, "stats", "stats_tese_cap4_sqp.jl")))
     using .StatsCap4SQP
     StatsCap4SQP.run_statistical_analysis(results_dir)
 

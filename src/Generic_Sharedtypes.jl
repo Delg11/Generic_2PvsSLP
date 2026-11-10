@@ -1,3 +1,9 @@
+"""
+    module SharedTypes
+
+Estruturas de dados comuns, parâmetros de configuração, modelos matemáticos JuMP e rotinas
+geométricas compartilhadas entre os algoritmos UNIF (Gomes & Senne, 2011) e Two-Phase (Birgin et al., 2026).
+"""
 module SharedTypes
 
 export StepLog, StepLog_UNIF, StepLog_TwoPhase, OptimizationProblem, OptimizedBuffers, TwoPhaseParams, UNIFParams, create_rosenbrock_problem0, create_rosenbrock_problem1, build_optimization_problem, GRB_ENV, SMALL_PROBLEMS,
@@ -152,7 +158,7 @@ Base.@kwdef mutable struct TwoPhaseParams
     max_time::Float64 = 60.0        # Maximum wall-clock time in seconds per variant (<=0 for unlimited)
     stag_tol::Float64 = 1e-5        # Step size threshold to trigger stagnation counter
     max_stag::Int = 3               # Maximum consecutive stagnated iterations allowed
-    non_monotone_M::Int = 5         # History length for non-monotone acceptance criteria
+    non_monotone_M::Int = 1         # History length for non-monotone acceptance criteria
 
     # Trust Region Update Strategies
     strong_agreement_rule::Bool = true # flag to enable/disable ared/pred ratio-based trust region expansion
@@ -842,6 +848,12 @@ function compute_gradient_projection(
         b_target = m > 0 ? jac_h * x : Float64[]
 
         function execute_dykstra!(out_buffer)
+            if m == 0
+                @inbounds for i in 1:n
+                    out_buffer[i] = clamp(v[i], xl[i], xu[i]) - x[i]
+                end
+                return
+            end
             p_dyk = copy(v)
             p_old = similar(p_dyk)
             q = zeros(n)
