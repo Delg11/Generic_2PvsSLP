@@ -65,6 +65,26 @@ fi
 JULIA_VERSION="$("${JULIA_BIN}" -v || true)"
 echo "ℹ️  Julia Detectado: ${JULIA_VERSION}"
 
+# ==============================================================================
+# Preparação do Ambiente Julia (Instanciação e Pré-compilação)
+# ==============================================================================
+if [ "${SKIP_INSTANTIATE:-false}" = "false" ]; then
+    echo ""
+    echo "================================================================================"
+    echo "📦 INSTANCIANDO PROJETO E VERIFICANDO DEPENDÊNCIAS VIA PKG"
+    echo "================================================================================"
+    "${JULIA_BIN}" --project="${PROJECT_DIR}" -e '
+        using Pkg
+        println("⏳ Ativando e instanciando o ambiente do projeto (Pkg.instantiate())...")
+        Pkg.instantiate()
+        println("⏳ Pré-compilando pacotes para evitar overhead de JIT nos workers (Pkg.precompile())...")
+        Pkg.precompile()
+        println("✅ Ambiente e dependências prontos com sucesso!")
+    '
+    echo "================================================================================"
+    echo ""
+fi
+
 # Montagem dos argumentos conforme o modo
 COMMON_ARGS=(
     --project="${PROJECT_DIR}"
