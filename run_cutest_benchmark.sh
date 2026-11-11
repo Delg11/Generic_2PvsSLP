@@ -77,9 +77,7 @@ if [ "${SKIP_INSTANTIATE:-false}" = "false" ]; then
         using Pkg
         println("⏳ Ativando e instanciando o ambiente do projeto (Pkg.instantiate())...")
         Pkg.instantiate()
-        println("⏳ Pré-compilando pacotes para evitar overhead de JIT nos workers (Pkg.precompile())...")
-        Pkg.precompile()
-        println("✅ Ambiente e dependências prontos com sucesso!")
+        println("✅ Dependências verificadas e prontas!")
     '
     echo "================================================================================"
     echo ""
