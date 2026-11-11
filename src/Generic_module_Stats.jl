@@ -836,7 +836,8 @@ function plot_profile(
                     if st == "KKT_OK" && (isnan(h_val) || h_val <= h_tol)
                         val = Float64(row[1, metric_col])
                         if isfinite(val)
-                            perf_matrix[i, j] = val <= 0.0 ? 1e-8 : val
+                            floor_val = metric_col == :Iterations ? 1.0 : 1e-3
+                            perf_matrix[i, j] = val <= 0.0 ? floor_val : val
                         end
                     end
                 end
@@ -878,7 +879,8 @@ function plot_profile(
                         if f_val <= best_f + f_tol * (1.0 + abs(best_f))
                             val = Float64(row[1, metric_col])
                             if isfinite(val)
-                                perf_matrix[i, j] = val <= 0.0 ? 1e-8 : val
+                                floor_val = metric_col == :Iterations ? 1.0 : 1e-3
+                                perf_matrix[i, j] = val <= 0.0 ? floor_val : val
                             end
                         end
                     end
@@ -893,7 +895,7 @@ function plot_profile(
 
     valid_ratios = filter(x -> !isinf(x), ratios)
     max_tau = isempty(valid_ratios) ? 10.0 : maximum(valid_ratios)
-    plot_max = min(max(10.0, max_tau * 1.1), 1000.0)
+    plot_max = max(10.0, min(max_tau * 1.05, 1000.0))
 
     # Coleta dados e calcula estatísticas para ordenação da legenda
     solver_stats = []
@@ -926,6 +928,7 @@ function plot_profile(
                  guidefontsize=10,
                  tickfontsize=9,
                  legendfontsize=8,
+                 xlims=(1.0, plot_max),
                  ylims=(-0.02, 1.05),
                  yticks=(0.0:0.1:1.0, ["0%", "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%"]),
                  grid=true,
@@ -940,7 +943,8 @@ function plot_profile(
                  xscale=:log10, 
                  framestyle=:box,
                  dpi=300,
-                 size=(800, 600))
+                 size=(800, 600),
+                 xlims=(1.0, plot_max))
     end
 
     # Paleta de alta distinção para publicação
@@ -967,12 +971,20 @@ function plot_profile(
         y_vals = [0.0]
 
         for (k, r) in enumerate(sorted_r)
-            push!(x_vals, r)
-            push!(y_vals, k / n_probs)
+            if r <= plot_max
+                push!(x_vals, r)
+                push!(y_vals, k / n_probs)
+            else
+                push!(x_vals, plot_max)
+                push!(y_vals, k / n_probs)
+                break
+            end
         end
 
-        push!(x_vals, plot_max)
-        push!(y_vals, n_solved / n_probs)
+        if isempty(x_vals) || x_vals[end] < plot_max
+            push!(x_vals, plot_max)
+            push!(y_vals, n_solved / n_probs)
+        end
 
         clean_label = if paper_mode
             format_paper_label(s, rate)

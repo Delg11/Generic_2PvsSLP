@@ -256,7 +256,8 @@ function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol
                     
                     if f_val <= best_f + f_tol + f_tol * abs(best_f)
                         val = Float64(row[1, metric_col])
-                        perf_matrix[i, j] = val <= 0.0 ? 1e-8 : val
+                        floor_val = metric_col == :Iterations ? 1.0 : 1e-3
+                        perf_matrix[i, j] = val <= 0.0 ? floor_val : val
                     end
                 end
             end
@@ -269,7 +270,7 @@ function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol
 
     valid_ratios = filter(x -> !isinf(x), ratios)
     max_tau = isempty(valid_ratios) ? 10.0 : maximum(valid_ratios)
-    plot_max = max(10.0, max_tau * 1.1)
+    plot_max = max(10.0, min(max_tau * 1.05, 1000.0))
 
     p = plot(title=title_str, 
              xlabel="Performance Ratio (τ)", 
@@ -278,7 +279,8 @@ function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol
              xscale=:log10, 
              framestyle=:box,
              dpi=300,
-             size=(800, 600))
+             size=(800, 600),
+             xlims=(1.0, plot_max))
 
     for (j, s) in enumerate(solvers)
         sorted_r = sort(ratios[:, j])
@@ -290,12 +292,20 @@ function plot_profile(df::DataFrame, solvers::Vector{String}, metric_col::Symbol
         y_vals = [0.0]
         
         for (k, r) in enumerate(sorted_r)
-            push!(x_vals, r)
-            push!(y_vals, k / n_probs)
+            if r <= plot_max
+                push!(x_vals, r)
+                push!(y_vals, k / n_probs)
+            else
+                push!(x_vals, plot_max)
+                push!(y_vals, k / n_probs)
+                break
+            end
         end
         
-        push!(x_vals, plot_max)
-        push!(y_vals, n_solved / n_probs)
+        if isempty(x_vals) || x_vals[end] < plot_max
+            push!(x_vals, plot_max)
+            push!(y_vals, n_solved / n_probs)
+        end
 
         clean_label = replace(s, "SLP_" => "UNIF ", "UNIF_" => "UNIF ", "2P_" => "2P ", "BASE_SLP" => "UNIF SAR1_PH0_ATR0", "BASE_UNIF" => "UNIF SAR1_PH0_ATR0", "BASE_2P" => "2P SAR1_PH0_ATR0_RRU0")
 
