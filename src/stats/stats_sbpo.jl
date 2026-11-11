@@ -371,9 +371,10 @@ function generate_tournament_profiles(df::DataFrame, summary::DataFrame, out_dir
         
         # Grupo 4: Two-Phase - Step Shapes (PH & ATR)
         g4 = get_existing([
+            "2P_SAR0_PH0_ATR0_RRU1",
             "2P_SAR1_PH0_ATR0_RRU1",
-            "2P_SAR1_PH1_ATR0_RRU1",
-            "2P_SAR1_PH1_ATR1_RRU1"
+            "2P_SAR0_PH1_ATR0_RRU1",
+            "2P_SAR0_PH1_ATR1_RRU1"
         ])
         plot_profile(df, g4, :Time_ms, "Group 4: 2P - Step Shapes", joinpath(plots_dir, "Profile_G4_2P_Shapes.png"), color_map)
 
