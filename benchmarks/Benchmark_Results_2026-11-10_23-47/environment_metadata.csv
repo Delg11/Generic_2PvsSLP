@@ -1,0 +1,33 @@
+Category,Parameter,Value
+Git Provenance,Commit SHA (Short),0b0cc69
+Git Provenance,Commit SHA (Full),0b0cc69bde3ccfd9b7c618a7a1eec3d53aa6afe3
+Git Provenance,Active Branch,main
+Git Provenance,Working Tree Status,DIRTY (Uncommitted modifications present)
+Git Provenance,Commit Date,2026-11-10 23:16:57 -0300
+Git Provenance,Commit Message,fix(runner): remove Pkg.precompile from shell runner to prevent lld linker crash
+Git Provenance,Remote URL,https://github.com/Delg11/Generic_2PvsSLP.git
+Hardware Specs,CPU Model,Intel(R) Xeon(R) Silver 4114 CPU @ 2.20GHz
+Hardware Specs,Logical Threads / Cores,20
+Hardware Specs,Installed RAM (GB),156.86
+Hardware Specs,Host Machine,optimizationserver
+Hardware Specs,Operating System,Linux (x86_64-linux-gnu)
+Software Stack,Julia Version,1.12.6
+Software Stack,Julia Commit,15346901f0039751c5488744f1f62de7d87510a8
+Software Stack,LP Solver (Gurobi),13.0.2
+Software Stack,BLAS Config,"LBTConfig([ILP64] libopenblas64_.so, [LP64] libopenblas.so)"
+Software Stack,BLAS Threads,1
+Algorithmic Tolerances,Optimality Tol (tolG),0.001
+Algorithmic Tolerances,Feasibility Tol (tolF),0.05
+Algorithmic Tolerances,Min Step Length (tolS),0.0001
+Algorithmic Tolerances,Initial TR Radius (delta0),0.1
+Algorithmic Tolerances,Max Iterations,5000
+Algorithmic Tolerances,Consecutive Small Steps (maxcount),3
+Algorithmic Tolerances,Restoration Target (theta0),0.9
+Algorithmic Tolerances,Restoration Step Ratio (r_resto),0.9
+Algorithmic Tolerances,Non-monotone Memory (M),1
+Execution Run,Benchmark Mode,filter
+Execution Run,Distributed Workers,16
+Execution Run,Start Time,2026-11-10T23:54:32
+Execution Run,End Time,2026-11-11T01:43:26
+Execution Run,Total Wall Time (s),5856.58
+Execution Run,CLI Command,/home/gabrieldelgado/Generic_2PvsSLP/src/Generic_main.jl --workers 0 --max-iter 500 --timeout 60.0 --qp-solver gurobi --mode filter --max-var 200 --max-con 100 --tp-sar all --tp-ph all --tp-atr all --tp-atr-strat all --tp-rru all --tp-sqp all --unif-sar all --unif-ph all --unif-atr all --unif-atr-strat all --unif-sqp all

@@ -1,0 +1,49 @@
+{
+  "software": {
+    "blas_vendor": "LBTConfig([ILP64] libopenblas64_.so, [LP64] libopenblas.so)",
+    "julia_version": "1.12.6",
+    "julia_commit": "15346901f0039751c5488744f1f62de7d87510a8",
+    "gurobi_version": "13.0.2",
+    "blas_threads": 1
+  },
+  "hyperparameters": {
+    "tau1": 0.1,
+    "rfeas": 1.0e-12,
+    "delta_min": 1.0e-12,
+    "theta0": 0.9,
+    "maxcount": 3,
+    "r_resto": 0.9,
+    "delta0": 0.1,
+    "non_monotone_M": 1,
+    "tolS": 0.0001,
+    "max_iter": 5000,
+    "tolG": 0.001,
+    "tau2": 0.25,
+    "delta_max": 1.0e16,
+    "tolF": 0.05
+  },
+  "execution": {
+    "start_time": "2026-11-10T23:54:32",
+    "end_time": "2026-11-11T01:43:26",
+    "command_line": "/home/gabrieldelgado/Generic_2PvsSLP/src/Generic_main.jl --workers 0 --max-iter 500 --timeout 60.0 --qp-solver gurobi --mode filter --max-var 200 --max-con 100 --tp-sar all --tp-ph all --tp-atr all --tp-atr-strat all --tp-rru all --tp-sqp all --unif-sar all --unif-ph all --unif-atr all --unif-atr-strat all --unif-sqp all",
+    "mode": "filter",
+    "workers_count": 16,
+    "elapsed_seconds": 5856.576177012
+  },
+  "hardware": {
+    "cpu_model": "Intel(R) Xeon(R) Silver 4114 CPU @ 2.20GHz",
+    "ram_gb": 156.86,
+    "hostname": "optimizationserver",
+    "cpu_threads": 20,
+    "os": "Linux (x86_64-linux-gnu)"
+  },
+  "git": {
+    "commit_date": "2026-11-10 23:16:57 -0300",
+    "commit_full": "0b0cc69bde3ccfd9b7c618a7a1eec3d53aa6afe3",
+    "branch": "main",
+    "is_dirty": true,
+    "commit_message": "fix(runner): remove Pkg.precompile from shell runner to prevent lld linker crash",
+    "remote_url": "https://github.com/Delg11/Generic_2PvsSLP.git",
+    "commit_short": "0b0cc69"
+  }
+}
