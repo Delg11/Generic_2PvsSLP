@@ -243,7 +243,7 @@ function run_statistical_analysis(results_dir::String; target::Symbol=:artigo)
     xlsx_name = target == :resumo ? "Consolidated_Statistics_resumo.xlsx" : "Consolidated_Statistics.xlsx"
     xlsx_file = joinpath(results_dir, xlsx_name)
     XLSX.openxlsx(xlsx_file, mode="w") do xf
-        XLSX.addsheet!(xf, "Scenario_A")
+        XLSX.rename!(xf[1], "Scenario_A")
         XLSX.writetable!(xf["Scenario_A"], stats_A)
         XLSX.addsheet!(xf, "Scenario_B")
         XLSX.writetable!(xf["Scenario_B"], stats_B)
@@ -256,9 +256,6 @@ function run_statistical_analysis(results_dir::String; target::Symbol=:artigo)
         if nrow(df_inter) > 0
             XLSX.addsheet!(xf, "Inter_Method")
             XLSX.writetable!(xf["Inter_Method"], df_inter)
-        end
-        if "Sheet1" in XLSX.sheetnames(xf)
-            delete!(xf, "Sheet1")
         end
     end
     println("✅ Relatório XLSX salvo com sucesso em: $(basename(xlsx_file))")
