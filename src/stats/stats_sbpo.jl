@@ -240,7 +240,7 @@ function run_statistical_analysis(results_dir::String; target::Symbol=:artigo)
     df_inter = DataFrame(inter_results)
 
     # GRAVAÇÃO XLSX
-    xlsx_name = target == :resumo ? "Consolidated_Statistics_resumo.xlsx" : "Consolidated_Statistics.xlsx"
+    xlsx_name = target == :resumo ? "Consolidated_Statistics_resumo.xlsx" : "Consolidated_Statistics_sbpo.xlsx"
     xlsx_file = joinpath(results_dir, xlsx_name)
     XLSX.openxlsx(xlsx_file, mode="w") do xf
         XLSX.rename!(xf[1], "Scenario_A")

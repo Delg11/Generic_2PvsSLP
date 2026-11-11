@@ -235,7 +235,7 @@ function run_statistical_analysis(results_dir::String)
     df_inter_details = DataFrame(inter_details)
 
     # XLSX EXPORT
-    output_file = joinpath(results_dir, "Consolidated_Statistics.xlsx")
+    output_file = joinpath(results_dir, "Consolidated_Statistics_cap4_sqp.xlsx")
     XLSX.openxlsx(output_file, mode="w") do xf
         XLSX.rename!(xf[1], "Scenario_A")
         if nrow(stats_A) > 0 XLSX.writetable!(xf[1], collect(eachcol(stats_A)), names(stats_A)) end
